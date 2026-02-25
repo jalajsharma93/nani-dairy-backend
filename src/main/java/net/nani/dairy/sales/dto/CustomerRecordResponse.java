@@ -6,7 +6,9 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import net.nani.dairy.sales.CustomerType;
+import net.nani.dairy.sales.SubscriptionFrequency;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 
 @Getter
@@ -23,6 +25,10 @@ public class CustomerRecordResponse {
     private String collectionPoint;
     private boolean subscriptionActive;
     private Double dailySubscriptionQty;
+    private SubscriptionFrequency subscriptionFrequency;
+    private double runningBalance;
+    private double totalPaid;
+    private LocalDate lastPayoutDate;
     private boolean isActive;
     private String notes;
     private OffsetDateTime createdAt;

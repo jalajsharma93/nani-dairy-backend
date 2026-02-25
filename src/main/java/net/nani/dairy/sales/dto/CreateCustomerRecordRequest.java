@@ -10,6 +10,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import net.nani.dairy.sales.CustomerType;
+import net.nani.dairy.sales.SubscriptionFrequency;
 
 @Getter
 @Setter
@@ -39,6 +40,8 @@ public class CreateCustomerRecordRequest {
 
     @Positive
     private Double dailySubscriptionQty;
+
+    private SubscriptionFrequency subscriptionFrequency;
 
     @NotNull
     private Boolean isActive;

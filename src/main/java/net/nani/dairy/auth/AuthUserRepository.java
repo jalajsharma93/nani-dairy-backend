@@ -8,4 +8,6 @@ public interface AuthUserRepository extends JpaRepository<AuthUserEntity, String
     Optional<AuthUserEntity> findByUsernameIgnoreCase(String username);
 
     boolean existsByUsernameIgnoreCase(String username);
+
+    long countByRoleAndActive(UserRole role, boolean active);
 }

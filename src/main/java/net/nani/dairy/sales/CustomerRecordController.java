@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import net.nani.dairy.sales.dto.CreateCustomerRecordRequest;
 import net.nani.dairy.sales.dto.CustomerRecordResponse;
+import net.nani.dairy.sales.dto.RecordCustomerPayoutRequest;
 import net.nani.dairy.sales.dto.UpdateCustomerRecordRequest;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -37,5 +38,14 @@ public class CustomerRecordController {
             @Valid @RequestBody UpdateCustomerRecordRequest req
     ) {
         return service.update(customerId, req);
+    }
+
+    @PostMapping("/{customerId}/payout")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public CustomerRecordResponse recordPayout(
+            @PathVariable String customerId,
+            @Valid @RequestBody RecordCustomerPayoutRequest req
+    ) {
+        return service.recordPayout(customerId, req);
     }
 }

@@ -18,6 +18,7 @@ import net.nani.dairy.sales.dto.SalesSummaryResponse;
 import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
 import net.nani.dairy.sales.dto.UpdateSaleRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -38,6 +39,7 @@ public class SaleService {
     private final MilkEntryRepository milkEntryRepository;
     private final MedicalTreatmentRepository medicalTreatmentRepository;
     private final AnimalRepository animalRepository;
+    private final CustomerRecordRepository customerRecordRepository;
     private final SaleComplianceOverrideAuditRepository saleComplianceOverrideAuditRepository;
 
     public List<SaleResponse> list(LocalDate date, CustomerType customerType, ProductType productType) {
@@ -64,8 +66,17 @@ public class SaleService {
         return rows.stream().map(this::toResponse).toList();
     }
 
+    @Transactional
     public SaleResponse create(CreateSaleRequest req, String actorUsername) {
         String saleId = buildId();
+        CustomerRecordEntity linkedCustomer = resolveLinkedCustomer(req.getCustomerId(), req.getCustomerName());
+        String normalizedCustomerName = linkedCustomer != null
+                ? linkedCustomer.getCustomerName()
+                : req.getCustomerName().trim();
+        CustomerType normalizedCustomerType = linkedCustomer != null
+                ? linkedCustomer.getCustomerType()
+                : req.getCustomerType();
+
         validateMilkRule(
                 req.getProductType(),
                 req.getBatchDate(),
@@ -74,14 +85,14 @@ public class SaleService {
                 req.getOverrideReason(),
                 saleId,
                 req.getDispatchDate(),
-                req.getCustomerName(),
+                normalizedCustomerName,
                 actorUsername,
                 "CREATE"
         );
 
         SettlementPricing pricing = resolveSettlementPricing(
                 req.getProductType(),
-                req.getCustomerType(),
+                normalizedCustomerType,
                 req.getQuantity(),
                 req.getUnitPrice(),
                 req.getRouteName(),
@@ -97,8 +108,9 @@ public class SaleService {
         SaleEntity entity = SaleEntity.builder()
                 .saleId(saleId)
                 .dispatchDate(req.getDispatchDate())
-                .customerType(req.getCustomerType())
-                .customerName(req.getCustomerName().trim())
+                .customerType(normalizedCustomerType)
+                .customerId(linkedCustomer != null ? linkedCustomer.getCustomerId() : trimToNull(req.getCustomerId()))
+                .customerName(normalizedCustomerName)
                 .productType(req.getProductType())
                 .quantity(req.getQuantity())
                 .unitPrice(pricing.effectiveUnitPrice())
@@ -118,6 +130,9 @@ public class SaleService {
                 .totalAmount(payment.totalAmount)
                 .receivedAmount(payment.receivedAmount)
                 .pendingAmount(payment.pendingAmount)
+                .subscriptionChargeApplied(false)
+                .subscriptionBalanceImpact(0.0)
+                .customerBalanceAfterSale(linkedCustomer != null ? safeDouble(linkedCustomer.getRunningBalance()) : null)
                 .paymentStatus(payment.paymentStatus)
                 .paymentMode(req.getPaymentMode())
                 .batchDate(req.getBatchDate())
@@ -125,10 +140,20 @@ public class SaleService {
                 .notes(trimToNull(req.getNotes()))
                 .build();
 
+        applySubscriptionBalanceImpact(entity, linkedCustomer);
         return toResponse(saleRepository.save(entity));
     }
 
+    @Transactional
     public SaleResponse update(String saleId, UpdateSaleRequest req, String actorUsername) {
+        CustomerRecordEntity linkedCustomer = resolveLinkedCustomer(req.getCustomerId(), req.getCustomerName());
+        String normalizedCustomerName = linkedCustomer != null
+                ? linkedCustomer.getCustomerName()
+                : req.getCustomerName().trim();
+        CustomerType normalizedCustomerType = linkedCustomer != null
+                ? linkedCustomer.getCustomerType()
+                : req.getCustomerType();
+
         validateMilkRule(
                 req.getProductType(),
                 req.getBatchDate(),
@@ -137,7 +162,7 @@ public class SaleService {
                 req.getOverrideReason(),
                 saleId,
                 req.getDispatchDate(),
-                req.getCustomerName(),
+                normalizedCustomerName,
                 actorUsername,
                 "UPDATE"
         );
@@ -145,9 +170,13 @@ public class SaleService {
         SaleEntity entity = saleRepository.findById(saleId)
                 .orElseThrow(() -> new IllegalArgumentException("Sale not found"));
 
+        String previousCustomerId = trimToNull(entity.getCustomerId());
+        boolean previousChargeApplied = Boolean.TRUE.equals(entity.getSubscriptionChargeApplied());
+        double previousBalanceImpact = safeDouble(entity.getSubscriptionBalanceImpact());
+
         SettlementPricing pricing = resolveSettlementPricing(
                 req.getProductType(),
-                req.getCustomerType(),
+                normalizedCustomerType,
                 req.getQuantity(),
                 req.getUnitPrice(),
                 req.getRouteName(),
@@ -161,8 +190,9 @@ public class SaleService {
         PaymentValues payment = computePayment(req.getQuantity(), pricing.effectiveUnitPrice(), req.getReceivedAmount());
 
         entity.setDispatchDate(req.getDispatchDate());
-        entity.setCustomerType(req.getCustomerType());
-        entity.setCustomerName(req.getCustomerName().trim());
+        entity.setCustomerType(normalizedCustomerType);
+        entity.setCustomerId(linkedCustomer != null ? linkedCustomer.getCustomerId() : trimToNull(req.getCustomerId()));
+        entity.setCustomerName(normalizedCustomerName);
         entity.setProductType(req.getProductType());
         entity.setQuantity(req.getQuantity());
         entity.setUnitPrice(pricing.effectiveUnitPrice());
@@ -187,6 +217,17 @@ public class SaleService {
         entity.setReconciledAt(null);
         entity.setReconciledBy(null);
         entity.setReconciliationNote(null);
+
+        if (previousChargeApplied && previousCustomerId != null && previousBalanceImpact > 0) {
+            CustomerRecordEntity previousCustomer = customerRecordRepository.findById(previousCustomerId)
+                    .orElseThrow(() -> new IllegalArgumentException("Linked customer not found for existing sale"));
+            adjustCustomerRunningBalance(previousCustomer, -previousBalanceImpact);
+        }
+
+        entity.setSubscriptionChargeApplied(false);
+        entity.setSubscriptionBalanceImpact(0.0);
+        entity.setCustomerBalanceAfterSale(linkedCustomer != null ? safeDouble(linkedCustomer.getRunningBalance()) : null);
+        applySubscriptionBalanceImpact(entity, linkedCustomer);
 
         return toResponse(saleRepository.save(entity));
     }
@@ -364,6 +405,7 @@ public class SaleService {
                 .toList();
     }
 
+    @Transactional
     public DeliveryChecklistItemResponse updateDelivery(String saleId, UpdateSaleDeliveryRequest req, String actorUsername) {
         SaleEntity entity = saleRepository.findById(saleId)
                 .orElseThrow(() -> new IllegalArgumentException("Sale not found"));
@@ -372,6 +414,7 @@ public class SaleService {
         entity.setDelivered(delivered);
         entity.setDeliveryNote(trimToNull(req.getDeliveryNote()));
 
+        double previousPending = entity.getPendingAmount();
         Double collectedAmount = req.getCollectedAmount();
         if (collectedAmount != null) {
             if (collectedAmount < 0) {
@@ -387,6 +430,20 @@ public class SaleService {
             entity.setPaymentStatus(paymentStatusFrom(entity.getTotalAmount(), nextReceived));
         }
 
+        if (Boolean.TRUE.equals(entity.getSubscriptionChargeApplied()) && trimToNull(entity.getCustomerId()) != null) {
+            double deltaPending = entity.getPendingAmount() - previousPending;
+            if (deltaPending != 0) {
+                CustomerRecordEntity customer = customerRecordRepository.findById(entity.getCustomerId())
+                        .orElseThrow(() -> new IllegalArgumentException("Linked customer not found for sale"));
+                double nextCustomerBalance = adjustCustomerRunningBalance(customer, deltaPending);
+                entity.setSubscriptionBalanceImpact(entity.getPendingAmount());
+                entity.setCustomerBalanceAfterSale(nextCustomerBalance);
+                if (entity.getPendingAmount() <= 0) {
+                    entity.setSubscriptionChargeApplied(false);
+                }
+            }
+        }
+
         if (delivered) {
             entity.setDeliveredAt(OffsetDateTime.now());
             entity.setDeliveredBy(normalizeActor(actorUsername));
@@ -396,6 +453,56 @@ public class SaleService {
         }
 
         return toDeliveryChecklistItemResponse(saleRepository.save(entity));
+    }
+
+    private CustomerRecordEntity resolveLinkedCustomer(String customerId, String customerName) {
+        String normalizedCustomerId = trimToNull(customerId);
+        if (normalizedCustomerId != null) {
+            return customerRecordRepository.findById(normalizedCustomerId)
+                    .orElseThrow(() -> new IllegalArgumentException("Customer not found for customerId: " + normalizedCustomerId));
+        }
+
+        String normalizedCustomerName = trimToNull(customerName);
+        if (normalizedCustomerName == null) {
+            return null;
+        }
+
+        List<CustomerRecordEntity> matches = customerRecordRepository.findByCustomerNameIgnoreCase(normalizedCustomerName);
+        if (matches.isEmpty()) {
+            return null;
+        }
+        if (matches.size() > 1) {
+            throw new IllegalArgumentException("Multiple customers found for name. Pass customerId.");
+        }
+        return matches.get(0);
+    }
+
+    private void applySubscriptionBalanceImpact(SaleEntity sale, CustomerRecordEntity linkedCustomer) {
+        if (linkedCustomer == null
+                || !linkedCustomer.isSubscriptionActive()
+                || sale.getProductType() != ProductType.MILK
+                || sale.getPendingAmount() <= 0) {
+            sale.setSubscriptionChargeApplied(false);
+            sale.setSubscriptionBalanceImpact(0.0);
+            sale.setCustomerBalanceAfterSale(linkedCustomer != null ? safeDouble(linkedCustomer.getRunningBalance()) : null);
+            return;
+        }
+
+        double nextBalance = adjustCustomerRunningBalance(linkedCustomer, sale.getPendingAmount());
+        sale.setSubscriptionChargeApplied(true);
+        sale.setSubscriptionBalanceImpact(sale.getPendingAmount());
+        sale.setCustomerBalanceAfterSale(nextBalance);
+    }
+
+    private double adjustCustomerRunningBalance(CustomerRecordEntity customer, double delta) {
+        double current = safeDouble(customer.getRunningBalance());
+        double next = current + delta;
+        if (next < 0) {
+            next = 0;
+        }
+        customer.setRunningBalance(next);
+        customerRecordRepository.save(customer);
+        return next;
     }
 
     private void validateMilkRule(
@@ -671,11 +778,16 @@ public class SaleService {
         return normalized == null ? "unknown" : normalized;
     }
 
+    private double safeDouble(Double value) {
+        return value == null ? 0.0 : value;
+    }
+
     private SaleResponse toResponse(SaleEntity e) {
         return SaleResponse.builder()
                 .saleId(e.getSaleId())
                 .dispatchDate(e.getDispatchDate())
                 .customerType(e.getCustomerType())
+                .customerId(e.getCustomerId())
                 .customerName(e.getCustomerName())
                 .productType(e.getProductType())
                 .quantity(e.getQuantity())
@@ -700,6 +812,9 @@ public class SaleService {
                 .totalAmount(e.getTotalAmount())
                 .receivedAmount(e.getReceivedAmount())
                 .pendingAmount(e.getPendingAmount())
+                .subscriptionChargeApplied(Boolean.TRUE.equals(e.getSubscriptionChargeApplied()))
+                .subscriptionBalanceImpact(safeDouble(e.getSubscriptionBalanceImpact()))
+                .customerBalanceAfterSale(e.getCustomerBalanceAfterSale())
                 .paymentStatus(e.getPaymentStatus())
                 .paymentMode(e.getPaymentMode() != null ? e.getPaymentMode() : PaymentMode.CASH)
                 .batchDate(e.getBatchDate())

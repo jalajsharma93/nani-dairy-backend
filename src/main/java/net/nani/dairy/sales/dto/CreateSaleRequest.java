@@ -27,6 +27,9 @@ public class CreateSaleRequest {
     @NotNull
     private CustomerType customerType;
 
+    @Size(max = 80)
+    private String customerId;
+
     @NotBlank
     private String customerName;
 

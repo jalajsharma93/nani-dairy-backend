@@ -53,6 +53,7 @@ import net.nani.dairy.sales.ProductType;
 import net.nani.dairy.sales.SaleEntity;
 import net.nani.dairy.sales.SaleRepository;
 import net.nani.dairy.sales.SettlementCycle;
+import net.nani.dairy.sales.SubscriptionFrequency;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -650,6 +651,9 @@ public class AdminSeedService {
                 .collectionPoint("Central Chilling Plant")
                 .subscriptionActive(true)
                 .dailySubscriptionQty(120.0)
+                .subscriptionFrequency(SubscriptionFrequency.WEEKLY)
+                .runningBalance(0.0)
+                .totalPaid(0.0)
                 .isActive(true)
                 .notes("Monthly rate card applies.")
                 .build());
@@ -662,6 +666,9 @@ public class AdminSeedService {
                 .collectionPoint("Civil Lines")
                 .subscriptionActive(true)
                 .dailySubscriptionQty(35.0)
+                .subscriptionFrequency(SubscriptionFrequency.DAILY)
+                .runningBalance(516.0)
+                .totalPaid(0.0)
                 .isActive(true)
                 .notes("Evening delivery preferred.")
                 .build());
@@ -674,6 +681,9 @@ public class AdminSeedService {
                 .collectionPoint("Vaishali Nagar")
                 .subscriptionActive(true)
                 .dailySubscriptionQty(2.0)
+                .subscriptionFrequency(SubscriptionFrequency.DAILY)
+                .runningBalance(0.0)
+                .totalPaid(0.0)
                 .isActive(true)
                 .notes("Morning doorstep delivery.")
                 .build());
@@ -686,6 +696,9 @@ public class AdminSeedService {
                 .collectionPoint("Vaishali Nagar")
                 .subscriptionActive(false)
                 .dailySubscriptionQty(null)
+                .subscriptionFrequency(null)
+                .runningBalance(384.0)
+                .totalPaid(0.0)
                 .isActive(true)
                 .notes("On-demand orders only.")
                 .build());
@@ -694,6 +707,7 @@ public class AdminSeedService {
                 .saleId("SALE_TST_MILK_01")
                 .dispatchDate(today)
                 .customerType(CustomerType.RETAIL)
+                .customerId("CUST_TST_RETAIL_01")
                 .customerName("Sharma Dairy Booth")
                 .productType(ProductType.MILK)
                 .quantity(36.0)
@@ -718,6 +732,9 @@ public class AdminSeedService {
                 .totalAmount(2016.0)
                 .receivedAmount(1500.0)
                 .pendingAmount(516.0)
+                .subscriptionChargeApplied(true)
+                .subscriptionBalanceImpact(516.0)
+                .customerBalanceAfterSale(516.0)
                 .paymentStatus(PaymentStatus.PARTIAL)
                 .paymentMode(PaymentMode.UPI)
                 .batchDate(today)
@@ -729,6 +746,7 @@ public class AdminSeedService {
                 .saleId("SALE_TST_COOP_01")
                 .dispatchDate(today)
                 .customerType(CustomerType.COOPERATIVE)
+                .customerId("CUST_TST_COOP_01")
                 .customerName("Jaipur Milk Cooperative")
                 .productType(ProductType.MILK)
                 .quantity(120.0)
@@ -753,6 +771,9 @@ public class AdminSeedService {
                 .totalAmount(4560.0)
                 .receivedAmount(4560.0)
                 .pendingAmount(0.0)
+                .subscriptionChargeApplied(false)
+                .subscriptionBalanceImpact(0.0)
+                .customerBalanceAfterSale(0.0)
                 .paymentStatus(PaymentStatus.PAID)
                 .paymentMode(PaymentMode.BANK_TRANSFER)
                 .batchDate(today)
@@ -764,6 +785,7 @@ public class AdminSeedService {
                 .saleId("SALE_TST_GHEE_01")
                 .dispatchDate(today.minusDays(1))
                 .customerType(CustomerType.INDIVIDUAL)
+                .customerId("CUST_TST_INDIV_01")
                 .customerName("Anjali Home")
                 .productType(ProductType.GHEE)
                 .quantity(4.5)
@@ -784,6 +806,9 @@ public class AdminSeedService {
                 .totalAmount(2790.0)
                 .receivedAmount(2790.0)
                 .pendingAmount(0.0)
+                .subscriptionChargeApplied(false)
+                .subscriptionBalanceImpact(0.0)
+                .customerBalanceAfterSale(0.0)
                 .paymentStatus(PaymentStatus.PAID)
                 .paymentMode(PaymentMode.CASH)
                 .notes("Value-added product sample")
@@ -792,6 +817,7 @@ public class AdminSeedService {
                 .saleId("SALE_TST_PENDING_01")
                 .dispatchDate(today)
                 .customerType(CustomerType.INDIVIDUAL)
+                .customerId("CUST_TST_INDIV_02")
                 .customerName("Rohit Family")
                 .productType(ProductType.MILK)
                 .quantity(6.0)
@@ -812,6 +838,9 @@ public class AdminSeedService {
                 .totalAmount(384.0)
                 .receivedAmount(0.0)
                 .pendingAmount(384.0)
+                .subscriptionChargeApplied(false)
+                .subscriptionBalanceImpact(0.0)
+                .customerBalanceAfterSale(384.0)
                 .paymentStatus(PaymentStatus.UNPAID)
                 .paymentMode(PaymentMode.CREDIT)
                 .batchDate(today)

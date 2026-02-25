@@ -15,6 +15,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 
 @Entity
@@ -56,6 +57,19 @@ public class CustomerRecordEntity {
     @Column(name = "daily_subscription_qty")
     private Double dailySubscriptionQty;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "subscription_frequency", length = 20)
+    private SubscriptionFrequency subscriptionFrequency;
+
+    @Column(name = "running_balance")
+    private Double runningBalance;
+
+    @Column(name = "total_paid")
+    private Double totalPaid;
+
+    @Column(name = "last_payout_date")
+    private LocalDate lastPayoutDate;
+
     @Column(name = "is_active", nullable = false)
     private boolean isActive;
 
@@ -73,6 +87,8 @@ public class CustomerRecordEntity {
         OffsetDateTime now = OffsetDateTime.now();
         createdAt = now;
         updatedAt = now;
+        if (runningBalance == null) runningBalance = 0.0;
+        if (totalPaid == null) totalPaid = 0.0;
     }
 
     @PreUpdate

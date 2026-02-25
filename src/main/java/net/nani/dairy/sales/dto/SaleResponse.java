@@ -20,6 +20,7 @@ public class SaleResponse {
     private String saleId;
     private LocalDate dispatchDate;
     private CustomerType customerType;
+    private String customerId;
     private String customerName;
     private ProductType productType;
     private double quantity;
@@ -44,6 +45,9 @@ public class SaleResponse {
     private double totalAmount;
     private double receivedAmount;
     private double pendingAmount;
+    private boolean subscriptionChargeApplied;
+    private double subscriptionBalanceImpact;
+    private Double customerBalanceAfterSale;
     private PaymentStatus paymentStatus;
     private PaymentMode paymentMode;
     private LocalDate batchDate;

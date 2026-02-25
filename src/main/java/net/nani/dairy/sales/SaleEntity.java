@@ -27,6 +27,9 @@ public class SaleEntity {
     @Column(name = "customer_type", nullable = false, length = 30)
     private CustomerType customerType;
 
+    @Column(name = "customer_id", length = 80)
+    private String customerId;
+
     @Column(name = "customer_name", nullable = false, length = 120)
     private String customerName;
 
@@ -101,6 +104,15 @@ public class SaleEntity {
     @Column(name = "pending_amount", nullable = false)
     private double pendingAmount;
 
+    @Column(name = "subscription_charge_applied")
+    private Boolean subscriptionChargeApplied;
+
+    @Column(name = "subscription_balance_impact")
+    private Double subscriptionBalanceImpact;
+
+    @Column(name = "customer_balance_after_sale")
+    private Double customerBalanceAfterSale;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "payment_status", nullable = false, length = 20)
     private PaymentStatus paymentStatus;
@@ -135,6 +147,8 @@ public class SaleEntity {
         if (qualityPricingApplied == null) qualityPricingApplied = false;
         if (reconciled == null) reconciled = false;
         if (delivered == null) delivered = false;
+        if (subscriptionChargeApplied == null) subscriptionChargeApplied = false;
+        if (subscriptionBalanceImpact == null) subscriptionBalanceImpact = 0.0;
     }
 
     @PreUpdate
