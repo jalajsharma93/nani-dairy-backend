@@ -167,13 +167,30 @@ public class HealthService {
         LocalDate effectiveDate = date != null ? date : LocalDate.now();
         int safeWindowDays = sanitizeWindowDays(windowDays);
         LocalDate toDate = effectiveDate.plusDays(safeWindowDays);
+        List<VaccinationEntity> vaccinationRows = vaccinationRepository.findAll();
+
+        long vaccinationsDueToday = vaccinationRows.stream()
+                .map(this::resolveVaccinationDueDate)
+                .filter(Objects::nonNull)
+                .filter(dueDate -> dueDate.isEqual(effectiveDate))
+                .count();
+        long vaccinationsDueSoon = vaccinationRows.stream()
+                .map(this::resolveVaccinationDueDate)
+                .filter(Objects::nonNull)
+                .filter(dueDate -> dueDate.isAfter(effectiveDate) && !dueDate.isAfter(toDate))
+                .count();
+        long vaccinationsOverdue = vaccinationRows.stream()
+                .map(this::resolveVaccinationDueDate)
+                .filter(Objects::nonNull)
+                .filter(dueDate -> dueDate.isBefore(effectiveDate))
+                .count();
 
         return HealthSummaryResponse.builder()
                 .date(effectiveDate)
                 .windowDays(safeWindowDays)
-                .vaccinationsDueToday(vaccinationRepository.countByNextDueDate(effectiveDate))
-                .vaccinationsDueSoon(vaccinationRepository.countByNextDueDateAfterAndNextDueDateLessThanEqual(effectiveDate, toDate))
-                .vaccinationsOverdue(vaccinationRepository.countByNextDueDateBefore(effectiveDate))
+                .vaccinationsDueToday(vaccinationsDueToday)
+                .vaccinationsDueSoon(vaccinationsDueSoon)
+                .vaccinationsOverdue(vaccinationsOverdue)
                 .dewormingDueToday(dewormingRepository.countByNextDueDate(effectiveDate))
                 .dewormingDueSoon(dewormingRepository.countByNextDueDateAfterAndNextDueDateLessThanEqual(effectiveDate, toDate))
                 .dewormingOverdue(dewormingRepository.countByNextDueDateBefore(effectiveDate))
@@ -314,20 +331,23 @@ public class HealthService {
     }
 
     private void addVaccinationTasks(LocalDate effectiveDate, LocalDate toDate, List<WorklistItemResponse> items) {
-        vaccinationRepository.findByNextDueDateIsNotNullAndNextDueDateLessThanEqualOrderByNextDueDateAsc(toDate)
+        vaccinationRepository.findAll().stream()
+                .map(row -> new VaccinationDueCandidate(row, resolveVaccinationDueDate(row)))
+                .filter(row -> row.dueDate != null && !row.dueDate.isAfter(toDate))
+                .sorted(Comparator.comparing(row -> row.dueDate))
                 .forEach(row -> {
-                    WorklistDueStatus dueStatus = dueStatus(row.getNextDueDate(), effectiveDate);
+                    WorklistDueStatus dueStatus = dueStatus(row.dueDate, effectiveDate);
                     WorklistPriority priority = dueStatus == WorklistDueStatus.DUE_SOON ? WorklistPriority.MEDIUM : WorklistPriority.HIGH;
                     items.add(buildWorklistItem(
                             "VAC",
-                            row.getVaccinationId(),
+                            row.entity.getVaccinationId(),
                             WorklistTaskType.VACCINATION_DUE,
                             priority,
                             dueStatus,
-                            row.getNextDueDate(),
-                            row.getAnimalId(),
+                            row.dueDate,
+                            row.entity.getAnimalId(),
                             "Vaccination due",
-                            "Vaccine " + row.getVaccineName() + " for " + row.getDiseaseTarget()
+                            "Vaccine " + row.entity.getVaccineName() + " for " + row.entity.getDiseaseTarget()
                     ));
                 });
     }
@@ -764,6 +784,13 @@ public class HealthService {
         return requestedNextDueDate;
     }
 
+    private LocalDate resolveVaccinationDueDate(VaccinationEntity entity) {
+        if (entity == null) {
+            return null;
+        }
+        return resolveNextDueDate(entity.getVaccineName(), entity.getDoseDate(), entity.getNextDueDate());
+    }
+
     private String normalizeVaccineKey(String vaccineName) {
         if (vaccineName == null) {
             return "";
@@ -869,6 +896,16 @@ public class HealthService {
         private AvgWindow(double avg, long days) {
             this.avg = avg;
             this.days = days;
+        }
+    }
+
+    private static class VaccinationDueCandidate {
+        private final VaccinationEntity entity;
+        private final LocalDate dueDate;
+
+        private VaccinationDueCandidate(VaccinationEntity entity, LocalDate dueDate) {
+            this.entity = entity;
+            this.dueDate = dueDate;
         }
     }
 }
