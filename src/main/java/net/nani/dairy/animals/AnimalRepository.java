@@ -17,4 +17,6 @@ public interface AnimalRepository extends JpaRepository<AnimalEntity, String> {
     boolean existsByTag(String tag);
 
     Optional<AnimalEntity> findByTag(String tag);
+
+    Optional<AnimalEntity> findByTagIgnoreCase(String tag);
 }

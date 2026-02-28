@@ -26,9 +26,12 @@ public class CustomerRecordResponse {
     private boolean subscriptionActive;
     private Double dailySubscriptionQty;
     private SubscriptionFrequency subscriptionFrequency;
+    private LocalDate subscriptionPausedUntil;
+    private String subscriptionSkipDatesCsv;
     private double runningBalance;
     private double totalPaid;
     private LocalDate lastPayoutDate;
+    private Double defaultMilkUnitPrice;
     private boolean isActive;
     private String notes;
     private OffsetDateTime createdAt;

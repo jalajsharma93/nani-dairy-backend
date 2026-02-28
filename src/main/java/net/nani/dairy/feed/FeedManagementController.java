@@ -7,6 +7,7 @@ import net.nani.dairy.feed.dto.*;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
@@ -88,15 +89,28 @@ public class FeedManagementController {
     public List<FeedSopTaskResponse> listTasks(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
             @RequestParam(required = false) FeedSopTaskStatus status,
-            @RequestParam(required = false) UserRole assignedRole
+            @RequestParam(required = false) UserRole assignedRole,
+            @RequestParam(required = false) String assignedToUsername,
+            Authentication authentication
     ) {
-        return feedManagementService.listTasks(date, status, assignedRole);
+        return feedManagementService.listTasks(
+                date,
+                status,
+                assignedRole,
+                assignedToUsername,
+                actor(authentication),
+                actorRole(authentication),
+                hasAnyRole(authentication, "ADMIN", "MANAGER", "FEED_MANAGER")
+        );
     }
 
     @PostMapping("/tasks")
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER','FEED_MANAGER')")
-    public FeedSopTaskResponse createTask(@Valid @RequestBody CreateFeedSopTaskRequest req) {
-        return feedManagementService.createTask(req);
+    public FeedSopTaskResponse createTask(
+            @Valid @RequestBody CreateFeedSopTaskRequest req,
+            Authentication authentication
+    ) {
+        return feedManagementService.createTask(req, actor(authentication));
     }
 
     @PutMapping("/tasks/{taskId}")
@@ -116,10 +130,48 @@ public class FeedManagementController {
             @Valid @RequestBody UpdateFeedSopTaskStatusRequest req,
             Authentication authentication
     ) {
-        return feedManagementService.updateTaskStatus(taskId, req, actor(authentication));
+        return feedManagementService.updateTaskStatus(
+                taskId,
+                req,
+                actor(authentication),
+                actorRole(authentication),
+                hasAnyRole(authentication, "ADMIN", "MANAGER", "FEED_MANAGER")
+        );
     }
 
     private String actor(Authentication authentication) {
         return authentication != null ? authentication.getName() : "unknown";
+    }
+
+    private UserRole actorRole(Authentication authentication) {
+        if (authentication == null || authentication.getAuthorities() == null) {
+            return null;
+        }
+        for (GrantedAuthority authority : authentication.getAuthorities()) {
+            String value = authority == null ? "" : authority.getAuthority();
+            if (value.startsWith("ROLE_")) {
+                try {
+                    return UserRole.valueOf(value.substring("ROLE_".length()).toUpperCase());
+                } catch (IllegalArgumentException ignored) {
+                    // no-op
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean hasAnyRole(Authentication authentication, String... roles) {
+        if (authentication == null || authentication.getAuthorities() == null) {
+            return false;
+        }
+        for (GrantedAuthority authority : authentication.getAuthorities()) {
+            String value = authority == null ? "" : authority.getAuthority();
+            for (String role : roles) {
+                if (("ROLE_" + role).equalsIgnoreCase(value)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

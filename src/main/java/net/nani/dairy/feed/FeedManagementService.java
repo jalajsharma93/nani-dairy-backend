@@ -1,8 +1,11 @@
 package net.nani.dairy.feed;
 
 import lombok.RequiredArgsConstructor;
+import net.nani.dairy.auth.AuthUserEntity;
+import net.nani.dairy.auth.AuthUserRepository;
 import net.nani.dairy.auth.UserRole;
 import net.nani.dairy.feed.dto.*;
+import net.nani.dairy.tasks.TaskAutomationService;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -18,6 +21,8 @@ public class FeedManagementService {
     private final FeedMaterialRepository feedMaterialRepository;
     private final FeedRecipeRepository feedRecipeRepository;
     private final FeedSopTaskRepository feedSopTaskRepository;
+    private final AuthUserRepository authUserRepository;
+    private final TaskAutomationService taskAutomationService;
 
     public FeedManagementSummaryResponse summary(LocalDate date) {
         LocalDate effectiveDate = date != null ? date : LocalDate.now();
@@ -181,68 +186,122 @@ public class FeedManagementService {
         return toRecipeResponse(feedRecipeRepository.save(entity));
     }
 
-    public List<FeedSopTaskResponse> listTasks(LocalDate date, FeedSopTaskStatus status, UserRole assignedRole) {
-        List<FeedSopTaskEntity> rows;
-        if (date != null && status != null && assignedRole != null) {
-            rows = feedSopTaskRepository.findByTaskDateAndStatusAndAssignedRoleOrderByPriorityDescCreatedAtAsc(
-                    date,
-                    status,
-                    assignedRole
-            );
-        } else if (date != null && status != null) {
-            rows = feedSopTaskRepository.findByTaskDateAndStatusOrderByPriorityDescCreatedAtAsc(date, status);
-        } else if (date != null && assignedRole != null) {
-            rows = feedSopTaskRepository.findByTaskDateAndAssignedRoleOrderByPriorityDescCreatedAtAsc(date, assignedRole);
-        } else if (date != null) {
-            rows = feedSopTaskRepository.findByTaskDateOrderByPriorityDescCreatedAtAsc(date);
-        } else if (status != null && assignedRole != null) {
-            rows = feedSopTaskRepository.findByStatusAndAssignedRoleOrderByTaskDateAscPriorityDescCreatedAtAsc(status, assignedRole);
-        } else if (status != null) {
-            rows = feedSopTaskRepository.findByStatusOrderByTaskDateAscPriorityDescCreatedAtAsc(status);
-        } else if (assignedRole != null) {
-            rows = feedSopTaskRepository.findByAssignedRoleOrderByTaskDateAscPriorityDescCreatedAtAsc(assignedRole);
-        } else {
-            rows = feedSopTaskRepository.findAllByOrderByTaskDateAscCreatedAtAsc();
+    public List<FeedSopTaskResponse> listTasks(
+            LocalDate date,
+            FeedSopTaskStatus status,
+            UserRole assignedRole,
+            String assignedToUsername,
+            String actorUsername,
+            UserRole actorRole,
+            boolean privilegedActor
+    ) {
+        List<FeedSopTaskEntity> rows = findTasks(date, status, assignedRole);
+        String normalizedActor = normalizeActor(actorUsername);
+        String normalizedAssignedTo = trimToNull(assignedToUsername);
+
+        if (normalizedAssignedTo != null) {
+            if (!privilegedActor && !normalizedAssignedTo.equalsIgnoreCase(normalizedActor)) {
+                throw new IllegalArgumentException("Cannot view tasks assigned to another user");
+            }
+            rows = rows.stream()
+                    .filter(row -> normalizedAssignedTo.equalsIgnoreCase(trimToNull(row.getAssignedToUsername())))
+                    .toList();
         }
+
+        if (!privilegedActor) {
+            UserRole safeActorRole = actorRole != null ? actorRole : UserRole.WORKER;
+            rows = rows.stream()
+                    .filter(row -> {
+                        String assignee = trimToNull(row.getAssignedToUsername());
+                        if (assignee != null) {
+                            return assignee.equalsIgnoreCase(normalizedActor);
+                        }
+                        return row.getAssignedRole() == safeActorRole;
+                    })
+                    .toList();
+        }
+
         return rows.stream().map(this::toTaskResponse).toList();
     }
 
-    public FeedSopTaskResponse createTask(CreateFeedSopTaskRequest req) {
+    public FeedSopTaskResponse createTask(CreateFeedSopTaskRequest req, String actor) {
+        UserRole finalAssignedRole = req.getAssignedRole() != null ? req.getAssignedRole() : UserRole.WORKER;
+        String normalizedAssignedTo = resolveAssignee(req.getAssignedToUsername(), finalAssignedRole);
         FeedSopTaskEntity entity = FeedSopTaskEntity.builder()
                 .feedTaskId(buildId("FT"))
                 .taskDate(req.getTaskDate())
                 .title(normalizeRequired(req.getTitle(), "Task title is required"))
                 .details(trimToNull(req.getDetails()))
-                .assignedRole(req.getAssignedRole() != null ? req.getAssignedRole() : UserRole.WORKER)
+                .assignedRole(finalAssignedRole)
+                .assignedToUsername(normalizedAssignedTo)
+                .assignedByUsername(normalizedAssignedTo != null ? normalizeActor(actor) : null)
+                .assignedAt(normalizedAssignedTo != null ? LocalDateTime.now() : null)
                 .priority(req.getPriority() != null ? req.getPriority() : FeedSopTaskPriority.MEDIUM)
                 .status(FeedSopTaskStatus.PENDING)
                 .dueTime(req.getDueTime())
                 .build();
-        return toTaskResponse(feedSopTaskRepository.save(entity));
+        FeedSopTaskEntity saved = feedSopTaskRepository.save(entity);
+        taskAutomationService.upsertFromFeedTask(saved);
+        return toTaskResponse(saved);
     }
 
     public FeedSopTaskResponse updateTask(String taskId, UpdateFeedSopTaskRequest req, String actor) {
         FeedSopTaskEntity entity = feedSopTaskRepository.findById(taskId)
                 .orElseThrow(() -> new IllegalArgumentException("Task not found"));
 
+        String normalizedAssignedTo = resolveAssignee(req.getAssignedToUsername(), req.getAssignedRole());
+        String previousAssignee = trimToNull(entity.getAssignedToUsername());
+
         entity.setTaskDate(req.getTaskDate());
         entity.setTitle(normalizeRequired(req.getTitle(), "Task title is required"));
         entity.setDetails(trimToNull(req.getDetails()));
         entity.setAssignedRole(req.getAssignedRole());
+        entity.setAssignedToUsername(normalizedAssignedTo);
+        if (!sameUsername(previousAssignee, normalizedAssignedTo)) {
+            entity.setAssignedByUsername(normalizedAssignedTo != null ? normalizeActor(actor) : null);
+            entity.setAssignedAt(normalizedAssignedTo != null ? LocalDateTime.now() : null);
+        }
         entity.setPriority(req.getPriority());
         entity.setStatus(req.getStatus());
         entity.setDueTime(req.getDueTime());
         applyCompletionMetadata(entity, req.getStatus(), actor);
-
-        return toTaskResponse(feedSopTaskRepository.save(entity));
+        FeedSopTaskEntity saved = feedSopTaskRepository.save(entity);
+        taskAutomationService.upsertFromFeedTask(saved);
+        return toTaskResponse(saved);
     }
 
-    public FeedSopTaskResponse updateTaskStatus(String taskId, UpdateFeedSopTaskStatusRequest req, String actor) {
+    public FeedSopTaskResponse updateTaskStatus(
+            String taskId,
+            UpdateFeedSopTaskStatusRequest req,
+            String actor,
+            UserRole actorRole,
+            boolean privilegedActor
+    ) {
         FeedSopTaskEntity entity = feedSopTaskRepository.findById(taskId)
                 .orElseThrow(() -> new IllegalArgumentException("Task not found"));
+        String normalizedActor = normalizeActor(actor);
+        String assignedTo = trimToNull(entity.getAssignedToUsername());
+        UserRole safeActorRole = actorRole != null ? actorRole : UserRole.WORKER;
+
+        if (!privilegedActor) {
+            if (assignedTo != null && !assignedTo.equalsIgnoreCase(normalizedActor)) {
+                throw new IllegalArgumentException("Task is assigned to another user");
+            }
+            if (assignedTo == null) {
+                if (entity.getAssignedRole() != safeActorRole) {
+                    throw new IllegalArgumentException("Task role does not match your role");
+                }
+                entity.setAssignedToUsername(normalizedActor);
+                entity.setAssignedByUsername("system");
+                entity.setAssignedAt(LocalDateTime.now());
+            }
+        }
+
         entity.setStatus(req.getStatus());
         applyCompletionMetadata(entity, req.getStatus(), actor);
-        return toTaskResponse(feedSopTaskRepository.save(entity));
+        FeedSopTaskEntity saved = feedSopTaskRepository.save(entity);
+        taskAutomationService.upsertFromFeedTask(saved);
+        return toTaskResponse(saved);
     }
 
     private void applyCompletionMetadata(FeedSopTaskEntity entity, FeedSopTaskStatus status, String actor) {
@@ -293,6 +352,9 @@ public class FeedManagementService {
                 .title(entity.getTitle())
                 .details(entity.getDetails())
                 .assignedRole(entity.getAssignedRole())
+                .assignedToUsername(entity.getAssignedToUsername())
+                .assignedByUsername(entity.getAssignedByUsername())
+                .assignedAt(entity.getAssignedAt())
                 .priority(entity.getPriority())
                 .status(entity.getStatus())
                 .dueTime(entity.getDueTime())
@@ -311,6 +373,35 @@ public class FeedManagementService {
         return prefix + "_" + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    private List<FeedSopTaskEntity> findTasks(LocalDate date, FeedSopTaskStatus status, UserRole assignedRole) {
+        if (date != null && status != null && assignedRole != null) {
+            return feedSopTaskRepository.findByTaskDateAndStatusAndAssignedRoleOrderByPriorityDescCreatedAtAsc(
+                    date,
+                    status,
+                    assignedRole
+            );
+        }
+        if (date != null && status != null) {
+            return feedSopTaskRepository.findByTaskDateAndStatusOrderByPriorityDescCreatedAtAsc(date, status);
+        }
+        if (date != null && assignedRole != null) {
+            return feedSopTaskRepository.findByTaskDateAndAssignedRoleOrderByPriorityDescCreatedAtAsc(date, assignedRole);
+        }
+        if (date != null) {
+            return feedSopTaskRepository.findByTaskDateOrderByPriorityDescCreatedAtAsc(date);
+        }
+        if (status != null && assignedRole != null) {
+            return feedSopTaskRepository.findByStatusAndAssignedRoleOrderByTaskDateAscPriorityDescCreatedAtAsc(status, assignedRole);
+        }
+        if (status != null) {
+            return feedSopTaskRepository.findByStatusOrderByTaskDateAscPriorityDescCreatedAtAsc(status);
+        }
+        if (assignedRole != null) {
+            return feedSopTaskRepository.findByAssignedRoleOrderByTaskDateAscPriorityDescCreatedAtAsc(assignedRole);
+        }
+        return feedSopTaskRepository.findAllByOrderByTaskDateAscCreatedAtAsc();
+    }
+
     private String trimToNull(String value) {
         if (value == null) {
             return null;
@@ -325,6 +416,39 @@ public class FeedManagementService {
             throw new IllegalArgumentException(errorMessage);
         }
         return normalized;
+    }
+
+    private String resolveAssignee(String assignedToUsername, UserRole assignedRole) {
+        String normalizedAssignedTo = trimToNull(assignedToUsername);
+        if (normalizedAssignedTo == null) {
+            return null;
+        }
+        AuthUserEntity assignee = authUserRepository.findByUsernameIgnoreCase(normalizedAssignedTo)
+                .orElseThrow(() -> new IllegalArgumentException("Assigned user not found"));
+        if (!assignee.isActive()) {
+            throw new IllegalArgumentException("Assigned user is inactive");
+        }
+        if (assignedRole != assignee.getRole()) {
+            throw new IllegalArgumentException("Assigned user role must match assignedRole");
+        }
+        return assignee.getUsername();
+    }
+
+    private boolean sameUsername(String left, String right) {
+        String a = trimToNull(left);
+        String b = trimToNull(right);
+        if (a == null && b == null) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.equalsIgnoreCase(b);
+    }
+
+    private String normalizeActor(String actorUsername) {
+        String normalized = trimToNull(actorUsername);
+        return normalized == null ? "unknown" : normalized;
     }
 
     private String appendNote(String current, String line) {

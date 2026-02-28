@@ -1,0 +1,1177 @@
+package net.nani.dairy.sales;
+
+import lombok.RequiredArgsConstructor;
+import net.nani.dairy.auth.AuthUserRepository;
+import net.nani.dairy.milk.MilkBatchRepository;
+import net.nani.dairy.milk.QcStatus;
+import net.nani.dairy.milk.Shift;
+import net.nani.dairy.sales.dto.AddDeliveryTaskAddonRequest;
+import net.nani.dairy.sales.dto.CreateDeliveryTaskRequest;
+import net.nani.dairy.sales.dto.CreateDeliveryRunClosureRequest;
+import net.nani.dairy.sales.dto.CreateSaleRequest;
+import net.nani.dairy.sales.dto.DeliveryReconciliationRowResponse;
+import net.nani.dairy.sales.dto.DeliveryRunClosureResponse;
+import net.nani.dairy.sales.dto.DeliveryTaskResponse;
+import net.nani.dairy.sales.dto.SaleResponse;
+import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewItemResponse;
+import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewResponse;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskAssigneeRequest;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusRequest;
+import net.nani.dairy.tasks.TaskAutomationService;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+public class DeliveryTaskService {
+
+    private static final DateTimeFormatter SOURCE_TIME = DateTimeFormatter.ofPattern("HHmm");
+
+    private final DeliveryTaskRepository deliveryTaskRepository;
+    private final CustomerRecordRepository customerRecordRepository;
+    private final CustomerSubscriptionLineRepository subscriptionLineRepository;
+    private final DeliveryRunClosureRepository deliveryRunClosureRepository;
+    private final MilkBatchRepository milkBatchRepository;
+    private final SaleRepository saleRepository;
+    private final SaleService saleService;
+    private final AuthUserRepository authUserRepository;
+    private final TaskAutomationService taskAutomationService;
+
+    @Transactional
+    public List<DeliveryTaskResponse> list(
+            LocalDate date,
+            DeliveryTaskStatus status,
+            String actorUsername,
+            boolean privilegedActor
+    ) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        generateSubscriptionTasks(effectiveDate, actorUsername);
+        List<DeliveryTaskEntity> rows = status == null
+                ? deliveryTaskRepository.findByTaskDate(effectiveDate)
+                : deliveryTaskRepository.findByTaskDateAndStatus(effectiveDate, status);
+        String normalizedActor = normalizeActor(actorUsername);
+
+        if (!privilegedActor) {
+            rows = rows.stream()
+                    .filter(row -> {
+                        String assignee = trimToNull(row.getAssignedToUsername());
+                        return assignee == null || assignee.equalsIgnoreCase(normalizedActor);
+                    })
+                    .toList();
+        }
+
+        return rows.stream()
+                .sorted(deliverySort())
+                .map(this::toResponse)
+                .toList();
+    }
+
+    @Transactional
+    public int generateSubscriptionTasks(LocalDate date, String actorUsername) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        String actor = normalizeActor(actorUsername);
+
+        List<CustomerRecordEntity> customers = customerRecordRepository.findByIsActiveAndSubscriptionActive(true, true);
+        Map<String, CustomerRecordEntity> customerById = new HashMap<>();
+        for (CustomerRecordEntity customer : customers) {
+            customerById.put(customer.getCustomerId(), customer);
+        }
+
+        int generated = 0;
+        Set<String> customersWithLinePlans = subscriptionLineRepository.findByActiveTrue().stream()
+                .map(CustomerSubscriptionLineEntity::getCustomerId)
+                .filter(customerById::containsKey)
+                .collect(java.util.stream.Collectors.toSet());
+
+        List<CustomerSubscriptionLineEntity> activeLines = subscriptionLineRepository.findByActiveTrue();
+        for (CustomerSubscriptionLineEntity line : activeLines) {
+            CustomerRecordEntity customer = customerById.get(line.getCustomerId());
+            if (customer == null || !customer.isSubscriptionActive()) {
+                continue;
+            }
+            if (!shouldGenerateForDate(
+                    customer,
+                    effectiveDate,
+                    line.getActiveDaysCsv(),
+                    line.getStartDate(),
+                    line.getEndDate()
+            )) {
+                continue;
+            }
+
+            double qty = line.getQuantity();
+            double unitPrice = line.getUnitPrice() > 0
+                    ? line.getUnitPrice()
+                    : safeDouble(customer.getDefaultMilkUnitPrice());
+            if (qty <= 0 || unitPrice <= 0) {
+                continue;
+            }
+
+            generated += upsertSubscriptionTask(
+                    customer,
+                    effectiveDate,
+                    line.getTaskShift(),
+                    line.getProductType(),
+                    line.getPreferredTime(),
+                    qty,
+                    unitPrice,
+                    actor,
+                    line.getActiveDaysCsv(),
+                    line.getStartDate(),
+                    line.getEndDate()
+            );
+        }
+
+        // Backward-compatible fallback: customers with legacy daily qty but no subscription line rows.
+        for (CustomerRecordEntity customer : customers) {
+            if (customersWithLinePlans.contains(customer.getCustomerId())) {
+                continue;
+            }
+            if (!shouldGenerateForDate(customer, effectiveDate, null, null, null)) {
+                continue;
+            }
+            double totalQty = safeDouble(customer.getDailySubscriptionQty());
+            double unitPrice = safeDouble(customer.getDefaultMilkUnitPrice());
+            if (totalQty <= 0 || unitPrice <= 0) {
+                continue;
+            }
+
+            double amQty = roundTo2(totalQty / 2.0);
+            double pmQty = roundTo2(Math.max(0, totalQty - amQty));
+            generated += upsertSubscriptionTask(
+                    customer,
+                    effectiveDate,
+                    Shift.AM,
+                    ProductType.MILK,
+                    null,
+                    amQty,
+                    unitPrice,
+                    actor,
+                    null,
+                    null,
+                    null
+            );
+            generated += upsertSubscriptionTask(
+                    customer,
+                    effectiveDate,
+                    Shift.PM,
+                    ProductType.MILK,
+                    null,
+                    pmQty,
+                    unitPrice,
+                    actor,
+                    null,
+                    null,
+                    null
+            );
+        }
+
+        return generated;
+    }
+
+    @Transactional(readOnly = true)
+    public SubscriptionGenerationPreviewResponse previewSubscriptionGeneration(LocalDate date) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+
+        List<CustomerRecordEntity> customers = customerRecordRepository.findByIsActiveAndSubscriptionActive(true, true);
+        Map<String, CustomerRecordEntity> customerById = new HashMap<>();
+        for (CustomerRecordEntity customer : customers) {
+            customerById.put(customer.getCustomerId(), customer);
+        }
+
+        List<SubscriptionGenerationPreviewItemResponse> items = new ArrayList<>();
+
+        Set<String> customersWithLinePlans = subscriptionLineRepository.findByActiveTrue().stream()
+                .map(CustomerSubscriptionLineEntity::getCustomerId)
+                .filter(customerById::containsKey)
+                .collect(java.util.stream.Collectors.toSet());
+
+        List<CustomerSubscriptionLineEntity> activeLines = subscriptionLineRepository.findByActiveTrue();
+        for (CustomerSubscriptionLineEntity line : activeLines) {
+            CustomerRecordEntity customer = customerById.get(line.getCustomerId());
+            String reason = generationBlockReason(
+                    customer,
+                    effectiveDate,
+                    line.getActiveDaysCsv(),
+                    line.getStartDate(),
+                    line.getEndDate()
+            );
+
+            double qty = line.getQuantity();
+            double unitPrice = line.getUnitPrice() > 0
+                    ? line.getUnitPrice()
+                    : (customer != null ? safeDouble(customer.getDefaultMilkUnitPrice()) : 0.0);
+
+            if (reason == null) {
+                if (qty <= 0) {
+                    reason = "LINE_QTY_NOT_POSITIVE";
+                } else if (unitPrice <= 0) {
+                    reason = "LINE_UNIT_PRICE_NOT_POSITIVE";
+                }
+            }
+
+            items.add(SubscriptionGenerationPreviewItemResponse.builder()
+                    .source("LINE")
+                    .date(effectiveDate)
+                    .customerId(customer != null ? customer.getCustomerId() : line.getCustomerId())
+                    .customerName(customer != null ? customer.getCustomerName() : "Unknown")
+                    .routeName(customer != null ? trimToNull(customer.getRouteName()) : null)
+                    .subscriptionLineId(line.getSubscriptionLineId())
+                    .shift(line.getTaskShift())
+                    .productType(line.getProductType())
+                    .quantity(roundTo2(qty))
+                    .unitPrice(roundTo2(unitPrice))
+                    .activeDaysCsv(line.getActiveDaysCsv())
+                    .startDate(line.getStartDate())
+                    .endDate(line.getEndDate())
+                    .eligible(reason == null)
+                    .reason(reason)
+                    .build());
+        }
+
+        for (CustomerRecordEntity customer : customers) {
+            if (customersWithLinePlans.contains(customer.getCustomerId())) {
+                continue;
+            }
+            String customerRuleReason = generationBlockReason(customer, effectiveDate, null, null, null);
+            double totalQty = safeDouble(customer.getDailySubscriptionQty());
+            double unitPrice = safeDouble(customer.getDefaultMilkUnitPrice());
+            double amQty = roundTo2(totalQty / 2.0);
+            double pmQty = roundTo2(Math.max(0, totalQty - amQty));
+
+            String amReason = customerRuleReason;
+            if (amReason == null) {
+                if (amQty <= 0) {
+                    amReason = "LEGACY_QTY_NOT_POSITIVE";
+                } else if (unitPrice <= 0) {
+                    amReason = "LEGACY_UNIT_PRICE_NOT_POSITIVE";
+                }
+            }
+            items.add(SubscriptionGenerationPreviewItemResponse.builder()
+                    .source("LEGACY")
+                    .date(effectiveDate)
+                    .customerId(customer.getCustomerId())
+                    .customerName(customer.getCustomerName())
+                    .routeName(trimToNull(customer.getRouteName()))
+                    .subscriptionLineId(null)
+                    .shift(Shift.AM)
+                    .productType(ProductType.MILK)
+                    .quantity(amQty)
+                    .unitPrice(roundTo2(unitPrice))
+                    .activeDaysCsv(null)
+                    .startDate(null)
+                    .endDate(null)
+                    .eligible(amReason == null)
+                    .reason(amReason)
+                    .build());
+
+            String pmReason = customerRuleReason;
+            if (pmReason == null) {
+                if (pmQty <= 0) {
+                    pmReason = "LEGACY_QTY_NOT_POSITIVE";
+                } else if (unitPrice <= 0) {
+                    pmReason = "LEGACY_UNIT_PRICE_NOT_POSITIVE";
+                }
+            }
+            items.add(SubscriptionGenerationPreviewItemResponse.builder()
+                    .source("LEGACY")
+                    .date(effectiveDate)
+                    .customerId(customer.getCustomerId())
+                    .customerName(customer.getCustomerName())
+                    .routeName(trimToNull(customer.getRouteName()))
+                    .subscriptionLineId(null)
+                    .shift(Shift.PM)
+                    .productType(ProductType.MILK)
+                    .quantity(pmQty)
+                    .unitPrice(roundTo2(unitPrice))
+                    .activeDaysCsv(null)
+                    .startDate(null)
+                    .endDate(null)
+                    .eligible(pmReason == null)
+                    .reason(pmReason)
+                    .build());
+        }
+
+        int eligibleCount = (int) items.stream().filter(SubscriptionGenerationPreviewItemResponse::isEligible).count();
+        int total = items.size();
+        return SubscriptionGenerationPreviewResponse.builder()
+                .date(effectiveDate)
+                .totalCandidates(total)
+                .eligibleCandidates(eligibleCount)
+                .skippedCandidates(Math.max(0, total - eligibleCount))
+                .items(items)
+                .build();
+    }
+
+    @Transactional
+    public DeliveryTaskResponse create(CreateDeliveryTaskRequest req, String actorUsername) {
+        String normalizedActor = normalizeActor(actorUsername);
+        CustomerRecordEntity linkedCustomer = resolveLinkedCustomer(req.getCustomerId(), req.getCustomerName());
+        String normalizedAssignedTo = trimToNull(req.getAssignedToUsername());
+
+        String finalCustomerName = linkedCustomer != null ? linkedCustomer.getCustomerName() : trimToNull(req.getCustomerName());
+        if (finalCustomerName == null) {
+            throw new IllegalArgumentException("customerId or customerName is required");
+        }
+
+        Double effectiveUnitPrice = req.getUnitPrice();
+        if (effectiveUnitPrice == null && linkedCustomer != null) {
+            effectiveUnitPrice = linkedCustomer.getDefaultMilkUnitPrice();
+        }
+        if (effectiveUnitPrice == null || effectiveUnitPrice <= 0) {
+            throw new IllegalArgumentException("unitPrice is required (or set defaultMilkUnitPrice on customer)");
+        }
+
+        if (normalizedAssignedTo != null) {
+            authUserRepository.findByUsernameIgnoreCase(normalizedAssignedTo)
+                    .orElseThrow(() -> new IllegalArgumentException("Assigned user not found"));
+        }
+
+        Shift shift = req.getTaskShift() != null ? req.getTaskShift() : Shift.AM;
+        ProductType productType = req.getProductType() != null ? req.getProductType() : ProductType.MILK;
+
+        DeliveryTaskEntity entity = DeliveryTaskEntity.builder()
+                .deliveryTaskId(buildId())
+                .taskDate(req.getTaskDate())
+                .customerId(linkedCustomer != null ? linkedCustomer.getCustomerId() : null)
+                .customerName(finalCustomerName)
+                .assignedToUsername(normalizedAssignedTo)
+                .assignedByUsername(normalizedAssignedTo != null ? normalizedActor : null)
+                .assignedAt(normalizedAssignedTo != null ? OffsetDateTime.now() : null)
+                .routeName(linkedCustomer != null ? linkedCustomer.getRouteName() : null)
+                .productType(productType)
+                .taskShift(shift)
+                .preferredTime(req.getPreferredTime())
+                .plannedQtyLiters(req.getPlannedQtyLiters())
+                .unitPrice(effectiveUnitPrice)
+                .paymentMode(req.getPaymentMode() != null ? req.getPaymentMode() : PaymentMode.CREDIT)
+                .deliveredQtyLiters(null)
+                .saleId(null)
+                .saleRecordedAt(null)
+                .status(DeliveryTaskStatus.PENDING)
+                .autoGenerated(false)
+                .sourceRefId(null)
+                .notes(trimToNull(req.getNotes()))
+                .createdBy(normalizedActor)
+                .completedBy(null)
+                .completedAt(null)
+                .build();
+
+        DeliveryTaskEntity saved = deliveryTaskRepository.save(entity);
+        taskAutomationService.upsertFromDeliveryTask(saved);
+        return toResponse(saved);
+    }
+
+    @Transactional
+    public DeliveryTaskResponse addAddon(AddDeliveryTaskAddonRequest req, String actorUsername) {
+        String normalizedActor = normalizeActor(actorUsername);
+        CustomerRecordEntity linkedCustomer = resolveLinkedCustomer(req.getCustomerId(), req.getCustomerName());
+
+        String customerName = linkedCustomer != null ? linkedCustomer.getCustomerName() : trimToNull(req.getCustomerName());
+        if (customerName == null) {
+            throw new IllegalArgumentException("customerId or customerName is required");
+        }
+
+        String customerId = linkedCustomer != null ? linkedCustomer.getCustomerId() : null;
+        ProductType productType = req.getProductType() != null ? req.getProductType() : ProductType.MILK;
+        Shift shift = req.getTaskShift() != null ? req.getTaskShift() : Shift.AM;
+        LocalTime preferredTime = req.getPreferredTime();
+
+        Double unitPrice = req.getUnitPrice();
+        if ((unitPrice == null || unitPrice <= 0) && linkedCustomer != null) {
+            unitPrice = linkedCustomer.getDefaultMilkUnitPrice();
+        }
+        if (unitPrice == null || unitPrice <= 0) {
+            throw new IllegalArgumentException("unitPrice is required (or set defaultMilkUnitPrice on customer)");
+        }
+
+        DeliveryTaskEntity existing = findPendingMergeTarget(req.getTaskDate(), customerId, customerName, shift, productType, preferredTime);
+        if (existing != null && trimToNull(existing.getSaleId()) == null) {
+            existing.setPlannedQtyLiters(roundTo2(existing.getPlannedQtyLiters() + req.getQuantity()));
+            existing.setUnitPrice(unitPrice);
+            existing.setPaymentMode(req.getPaymentMode() != null ? req.getPaymentMode() : existing.getPaymentMode());
+            existing.setRouteName(linkedCustomer != null ? linkedCustomer.getRouteName() : existing.getRouteName());
+            existing.setNotes(mergeNotes(existing.getNotes(), req.getNotes(), normalizedActor));
+            DeliveryTaskEntity saved = deliveryTaskRepository.save(existing);
+            taskAutomationService.upsertFromDeliveryTask(saved);
+            return toResponse(saved);
+        }
+
+        DeliveryTaskEntity created = DeliveryTaskEntity.builder()
+                .deliveryTaskId(buildId())
+                .taskDate(req.getTaskDate())
+                .customerId(customerId)
+                .customerName(customerName)
+                .assignedToUsername(null)
+                .assignedByUsername(normalizedActor)
+                .assignedAt(OffsetDateTime.now())
+                .routeName(linkedCustomer != null ? linkedCustomer.getRouteName() : null)
+                .productType(productType)
+                .taskShift(shift)
+                .preferredTime(preferredTime)
+                .plannedQtyLiters(req.getQuantity())
+                .unitPrice(unitPrice)
+                .paymentMode(req.getPaymentMode() != null ? req.getPaymentMode() : PaymentMode.CREDIT)
+                .status(DeliveryTaskStatus.PENDING)
+                .autoGenerated(false)
+                .sourceRefId("ADDON:" + UUID.randomUUID().toString().substring(0, 10))
+                .notes(mergeNotes(null, req.getNotes(), normalizedActor))
+                .createdBy(normalizedActor)
+                .build();
+
+        DeliveryTaskEntity saved = deliveryTaskRepository.save(created);
+        taskAutomationService.upsertFromDeliveryTask(saved);
+        return toResponse(saved);
+    }
+
+    @Transactional
+    public DeliveryRunClosureResponse recordRunClosure(
+            CreateDeliveryRunClosureRequest req,
+            String actorUsername
+    ) {
+        String actor = normalizeActor(actorUsername);
+        String routeName = trimToNull(req.getRouteName());
+        if (routeName == null) {
+            throw new IllegalArgumentException("routeName is required");
+        }
+        if (req.getDate() == null) {
+            throw new IllegalArgumentException("date is required");
+        }
+        if (req.getShift() == null) {
+            throw new IllegalArgumentException("shift is required");
+        }
+
+        long totalStops = req.getTotalStops() == null ? 0L : req.getTotalStops();
+        long deliveredStops = req.getDeliveredStops() == null ? 0L : req.getDeliveredStops();
+        long pendingStops = req.getPendingStops() == null ? 0L : req.getPendingStops();
+        long skippedStops = req.getSkippedStops() == null ? 0L : req.getSkippedStops();
+        if (deliveredStops + pendingStops + skippedStops != totalStops) {
+            throw new IllegalArgumentException("Stop counts do not match totalStops");
+        }
+
+        double expectedCollection = safeDouble(req.getExpectedCollection());
+        double actualCollection = safeDouble(req.getActualCollection());
+        double cashCollection = safeDouble(req.getCashCollection());
+        double upiCollection = safeDouble(req.getUpiCollection());
+        double otherCollection = safeDouble(req.getOtherCollection());
+        double variance = roundTo2(actualCollection - expectedCollection);
+
+        DeliveryRunClosureEntity entity = DeliveryRunClosureEntity.builder()
+                .runClosureId("DRC_" + UUID.randomUUID().toString().substring(0, 8))
+                .date(req.getDate())
+                .routeName(routeName)
+                .shift(req.getShift())
+                .totalStops(totalStops)
+                .deliveredStops(deliveredStops)
+                .pendingStops(pendingStops)
+                .skippedStops(skippedStops)
+                .expectedCollection(roundTo2(expectedCollection))
+                .actualCollection(roundTo2(actualCollection))
+                .variance(variance)
+                .cashCollection(roundTo2(cashCollection))
+                .upiCollection(roundTo2(upiCollection))
+                .otherCollection(roundTo2(otherCollection))
+                .notes(trimToNull(req.getNotes()))
+                .closedBy(actor)
+                .closedAt(OffsetDateTime.now())
+                .build();
+
+        DeliveryRunClosureEntity saved = deliveryRunClosureRepository.save(entity);
+        return toRunClosureResponse(saved);
+    }
+
+    public List<DeliveryRunClosureResponse> listRunClosures(
+            LocalDate date,
+            String actorUsername,
+            boolean privilegedActor
+    ) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        String actor = normalizeActor(actorUsername);
+        List<DeliveryRunClosureEntity> rows = deliveryRunClosureRepository.findByDateOrderByClosedAtDesc(effectiveDate);
+        if (!privilegedActor) {
+            rows = rows.stream()
+                    .filter(row -> actor.equalsIgnoreCase(trimToNull(row.getClosedBy())))
+                    .toList();
+        }
+        return rows.stream().map(this::toRunClosureResponse).toList();
+    }
+
+    @Transactional
+    public DeliveryTaskResponse assignTask(
+            String deliveryTaskId,
+            UpdateDeliveryTaskAssigneeRequest req,
+            String actorUsername
+    ) {
+        DeliveryTaskEntity entity = deliveryTaskRepository.findById(deliveryTaskId)
+                .orElseThrow(() -> new IllegalArgumentException("Delivery task not found"));
+        String normalizedActor = normalizeActor(actorUsername);
+        String nextAssignee = trimToNull(req.getAssignedToUsername());
+
+        if (entity.getStatus() == DeliveryTaskStatus.DELIVERED) {
+            throw new IllegalArgumentException("Delivered task cannot be reassigned");
+        }
+
+        if (nextAssignee != null) {
+            authUserRepository.findByUsernameIgnoreCase(nextAssignee)
+                    .orElseThrow(() -> new IllegalArgumentException("Assigned user not found"));
+        }
+
+        entity.setAssignedToUsername(nextAssignee);
+        entity.setAssignedByUsername(nextAssignee != null ? normalizedActor : null);
+        entity.setAssignedAt(nextAssignee != null ? OffsetDateTime.now() : null);
+
+        if (req.getNotes() != null) {
+            entity.setNotes(trimToNull(req.getNotes()));
+        }
+
+        DeliveryTaskEntity saved = deliveryTaskRepository.save(entity);
+        taskAutomationService.upsertFromDeliveryTask(saved);
+        return toResponse(saved);
+    }
+
+    @Transactional
+    public DeliveryTaskResponse updateStatus(
+            String deliveryTaskId,
+            UpdateDeliveryTaskStatusRequest req,
+            String actorUsername,
+            boolean privilegedActor
+    ) {
+        DeliveryTaskEntity entity = deliveryTaskRepository.findById(deliveryTaskId)
+                .orElseThrow(() -> new IllegalArgumentException("Delivery task not found"));
+        String normalizedActor = normalizeActor(actorUsername);
+        String currentAssignee = trimToNull(entity.getAssignedToUsername());
+
+        if (!privilegedActor) {
+            if (currentAssignee != null && !currentAssignee.equalsIgnoreCase(normalizedActor)) {
+                throw new IllegalArgumentException("Task is assigned to another user");
+            }
+            if (currentAssignee == null) {
+                entity.setAssignedToUsername(normalizedActor);
+                entity.setAssignedByUsername("system");
+                entity.setAssignedAt(OffsetDateTime.now());
+            }
+        }
+
+        boolean saleAlreadyRecorded = trimToNull(entity.getSaleId()) != null;
+        if (saleAlreadyRecorded && req.getDeliveredQtyLiters() != null) {
+            double existingDelivered = entity.getDeliveredQtyLiters() == null ? 0.0 : entity.getDeliveredQtyLiters();
+            if (Double.compare(existingDelivered, req.getDeliveredQtyLiters()) != 0) {
+                throw new IllegalArgumentException("Sale already recorded for this task; quantity cannot be changed");
+            }
+        }
+
+        DeliveryTaskStatus nextStatus = req.getStatus() != null ? req.getStatus() : entity.getStatus();
+        if (nextStatus == null) {
+            nextStatus = DeliveryTaskStatus.PENDING;
+        }
+        entity.setStatus(nextStatus);
+
+        if (req.getDeliveredQtyLiters() != null) {
+            if (req.getDeliveredQtyLiters() < 0) {
+                throw new IllegalArgumentException("deliveredQtyLiters cannot be negative");
+            }
+            entity.setDeliveredQtyLiters(req.getDeliveredQtyLiters());
+        }
+
+        if (nextStatus == DeliveryTaskStatus.DELIVERED) {
+            if (entity.getDeliveredQtyLiters() == null) {
+                entity.setDeliveredQtyLiters(entity.getPlannedQtyLiters());
+            }
+            if (entity.getDeliveredQtyLiters() <= 0) {
+                throw new IllegalArgumentException("Delivered quantity must be positive");
+            }
+            entity.setCompletedAt(OffsetDateTime.now());
+            entity.setCompletedBy(normalizedActor);
+
+            if (!saleAlreadyRecorded) {
+                SaleResponse sale = createSaleFromTask(entity, req.getCollectedAmount(), normalizedActor);
+                entity.setSaleId(sale.getSaleId());
+                entity.setSaleRecordedAt(OffsetDateTime.now());
+            }
+        } else {
+            entity.setCompletedAt(null);
+            entity.setCompletedBy(null);
+        }
+
+        if (req.getNotes() != null) {
+            entity.setNotes(trimToNull(req.getNotes()));
+        }
+
+        DeliveryTaskEntity saved = deliveryTaskRepository.save(entity);
+        taskAutomationService.upsertFromDeliveryTask(saved);
+        return toResponse(saved);
+    }
+
+    public List<DeliveryReconciliationRowResponse> reconciliation(LocalDate date, String actorUsername, boolean privilegedActor) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        String actor = normalizeActor(actorUsername);
+
+        List<DeliveryTaskEntity> tasks = deliveryTaskRepository.findByTaskDate(effectiveDate);
+        if (!privilegedActor) {
+            tasks = tasks.stream()
+                    .filter(task -> {
+                        String assignee = trimToNull(task.getAssignedToUsername());
+                        String completer = trimToNull(task.getCompletedBy());
+                        return actor.equalsIgnoreCase(assignee) || actor.equalsIgnoreCase(completer);
+                    })
+                    .toList();
+        }
+
+        List<String> saleIds = tasks.stream()
+                .map(DeliveryTaskEntity::getSaleId)
+                .map(this::trimToNull)
+                .filter(v -> v != null)
+                .distinct()
+                .toList();
+
+        Map<String, SaleEntity> saleById = new HashMap<>();
+        if (!saleIds.isEmpty()) {
+            for (SaleEntity sale : saleRepository.findAllById(saleIds)) {
+                saleById.put(sale.getSaleId(), sale);
+            }
+        }
+
+        Map<String, DeliveryReconciliationAccumulator> accByUser = new LinkedHashMap<>();
+        for (DeliveryTaskEntity task : tasks) {
+            String owner = trimToNull(task.getCompletedBy());
+            if (owner == null) {
+                owner = trimToNull(task.getAssignedToUsername());
+            }
+            if (owner == null) {
+                owner = "unassigned";
+            }
+
+            DeliveryReconciliationAccumulator acc = accByUser.computeIfAbsent(owner, DeliveryReconciliationAccumulator::new);
+            acc.assignedTasks += 1;
+            acc.plannedQty += task.getPlannedQtyLiters();
+
+            DeliveryTaskStatus status = task.getStatus() == null ? DeliveryTaskStatus.PENDING : task.getStatus();
+            switch (status) {
+                case DELIVERED -> {
+                    acc.deliveredTasks += 1;
+                    acc.deliveredQty += task.getDeliveredQtyLiters() != null
+                            ? task.getDeliveredQtyLiters()
+                            : task.getPlannedQtyLiters();
+                }
+                case SKIPPED -> acc.skippedTasks += 1;
+                case PENDING -> acc.pendingTasks += 1;
+            }
+
+            SaleEntity sale = saleById.get(task.getSaleId());
+            if (sale != null) {
+                acc.collectedAmount += safeDouble(sale.getReceivedAmount());
+                acc.pendingAmount += safeDouble(sale.getPendingAmount());
+            }
+        }
+
+        List<DeliveryReconciliationRowResponse> rows = new ArrayList<>();
+        for (DeliveryReconciliationAccumulator acc : accByUser.values()) {
+            rows.add(DeliveryReconciliationRowResponse.builder()
+                    .date(effectiveDate)
+                    .deliveryUsername(acc.deliveryUsername)
+                    .assignedTasks(acc.assignedTasks)
+                    .deliveredTasks(acc.deliveredTasks)
+                    .skippedTasks(acc.skippedTasks)
+                    .pendingTasks(acc.pendingTasks)
+                    .plannedQty(roundTo2(acc.plannedQty))
+                    .deliveredQty(roundTo2(acc.deliveredQty))
+                    .collectedAmount(roundTo2(acc.collectedAmount))
+                    .pendingAmount(roundTo2(acc.pendingAmount))
+                    .build());
+        }
+
+        rows.sort(Comparator.comparing(DeliveryReconciliationRowResponse::getDeliveryUsername, String.CASE_INSENSITIVE_ORDER));
+        return rows;
+    }
+
+    private SaleResponse createSaleFromTask(DeliveryTaskEntity entity, Double collectedAmount, String actorUsername) {
+        CustomerRecordEntity linkedCustomer = null;
+        String normalizedCustomerId = trimToNull(entity.getCustomerId());
+        if (normalizedCustomerId != null) {
+            linkedCustomer = customerRecordRepository.findById(normalizedCustomerId)
+                    .orElseThrow(() -> new IllegalArgumentException("Linked customer not found for delivery task"));
+        }
+
+        ProductType productType = entity.getProductType() != null ? entity.getProductType() : ProductType.MILK;
+        CustomerType customerType = linkedCustomer != null ? linkedCustomer.getCustomerType() : CustomerType.INDIVIDUAL;
+        Shift passShift = productType == ProductType.MILK ? resolvePassShift(entity.getTaskDate()) : null;
+        double quantity = entity.getDeliveredQtyLiters() != null ? entity.getDeliveredQtyLiters() : entity.getPlannedQtyLiters();
+        double receivedAmount = collectedAmount == null ? 0.0 : collectedAmount;
+
+        CreateSaleRequest saleRequest = CreateSaleRequest.builder()
+                .dispatchDate(entity.getTaskDate())
+                .customerType(customerType)
+                .customerId(normalizedCustomerId)
+                .customerName(entity.getCustomerName())
+                .productType(productType)
+                .quantity(quantity)
+                .unitPrice(entity.getUnitPrice())
+                .receivedAmount(receivedAmount)
+                .paymentMode(entity.getPaymentMode() != null ? entity.getPaymentMode() : PaymentMode.CREDIT)
+                .batchDate(productType == ProductType.MILK ? entity.getTaskDate() : null)
+                .batchShift(passShift)
+                .routeName(entity.getRouteName())
+                .collectionPoint(linkedCustomer != null ? linkedCustomer.getCollectionPoint() : null)
+                .notes("Auto sale from delivery task " + entity.getDeliveryTaskId())
+                .build();
+
+        return saleService.create(saleRequest, actorUsername);
+    }
+
+    private Shift resolvePassShift(LocalDate taskDate) {
+        if (milkBatchRepository.findByDateAndShift(taskDate, Shift.AM)
+                .map(batch -> batch.getQcStatus() == QcStatus.PASS)
+                .orElse(false)) {
+            return Shift.AM;
+        }
+        if (milkBatchRepository.findByDateAndShift(taskDate, Shift.PM)
+                .map(batch -> batch.getQcStatus() == QcStatus.PASS)
+                .orElse(false)) {
+            return Shift.PM;
+        }
+        throw new IllegalArgumentException("No PASS milk batch found for task date. Complete QC first.");
+    }
+
+    private String buildId() {
+        return "DTK_" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private int upsertSubscriptionTask(
+            CustomerRecordEntity customer,
+            LocalDate date,
+            Shift shift,
+            ProductType productType,
+            LocalTime preferredTime,
+            double qty,
+            double unitPrice,
+            String actor,
+            String activeDaysCsv,
+            LocalDate startDate,
+            LocalDate endDate
+    ) {
+        if (qty <= 0) {
+            return 0;
+        }
+
+        ProductType safeProduct = productType != null ? productType : ProductType.MILK;
+        String sourceRefId = buildSubscriptionSourceRef(customer.getCustomerId(), date, shift, safeProduct, preferredTime);
+        DeliveryTaskEntity existing = deliveryTaskRepository.findBySourceRefId(sourceRefId).orElse(null);
+        if (existing != null) {
+            if (existing.getStatus() == DeliveryTaskStatus.PENDING) {
+                existing.setCustomerName(customer.getCustomerName());
+                existing.setRouteName(trimToNull(customer.getRouteName()));
+                existing.setProductType(safeProduct);
+                existing.setTaskShift(shift);
+                existing.setPreferredTime(preferredTime);
+                existing.setPlannedQtyLiters(qty);
+                existing.setUnitPrice(unitPrice);
+                existing.setPaymentMode(PaymentMode.CREDIT);
+                existing.setAutoGenerated(true);
+                existing.setSourceRefId(sourceRefId);
+                existing.setNotes(buildSubscriptionNote(customer, shift, safeProduct, preferredTime, activeDaysCsv, startDate, endDate));
+                existing.setCreatedBy(existing.getCreatedBy() == null ? actor : existing.getCreatedBy());
+                DeliveryTaskEntity saved = deliveryTaskRepository.save(existing);
+                taskAutomationService.upsertFromDeliveryTask(saved);
+            }
+            return 0;
+        }
+
+        DeliveryTaskEntity created = DeliveryTaskEntity.builder()
+                .deliveryTaskId(buildId())
+                .taskDate(date)
+                .customerId(customer.getCustomerId())
+                .customerName(customer.getCustomerName())
+                .assignedToUsername(null)
+                .assignedByUsername(null)
+                .assignedAt(null)
+                .routeName(trimToNull(customer.getRouteName()))
+                .productType(safeProduct)
+                .taskShift(shift)
+                .preferredTime(preferredTime)
+                .plannedQtyLiters(qty)
+                .unitPrice(unitPrice)
+                .paymentMode(PaymentMode.CREDIT)
+                .deliveredQtyLiters(null)
+                .saleId(null)
+                .saleRecordedAt(null)
+                .status(DeliveryTaskStatus.PENDING)
+                .autoGenerated(true)
+                .sourceRefId(sourceRefId)
+                .notes(buildSubscriptionNote(customer, shift, safeProduct, preferredTime, activeDaysCsv, startDate, endDate))
+                .createdBy(actor)
+                .completedBy(null)
+                .completedAt(null)
+                .build();
+
+        DeliveryTaskEntity saved = deliveryTaskRepository.save(created);
+        taskAutomationService.upsertFromDeliveryTask(saved);
+        return 1;
+    }
+
+    private DeliveryTaskEntity findPendingMergeTarget(
+            LocalDate taskDate,
+            String customerId,
+            String customerName,
+            Shift shift,
+            ProductType productType,
+            LocalTime preferredTime
+    ) {
+        if (customerId != null) {
+            return deliveryTaskRepository
+                    .findByTaskDateAndCustomerIdAndTaskShiftAndProductTypeAndPreferredTimeAndStatus(
+                            taskDate,
+                            customerId,
+                            shift,
+                            productType,
+                            preferredTime,
+                            DeliveryTaskStatus.PENDING
+                    )
+                    .orElse(null);
+        }
+
+        String normalizedName = sortable(customerName);
+        for (DeliveryTaskEntity row : deliveryTaskRepository.findByTaskDateAndStatus(taskDate, DeliveryTaskStatus.PENDING)) {
+            if (!sortable(row.getCustomerName()).equals(normalizedName)) {
+                continue;
+            }
+            if (row.getTaskShift() != shift) {
+                continue;
+            }
+            if ((row.getProductType() != null ? row.getProductType() : ProductType.MILK) != productType) {
+                continue;
+            }
+            if (!java.util.Objects.equals(row.getPreferredTime(), preferredTime)) {
+                continue;
+            }
+            return row;
+        }
+        return null;
+    }
+
+    private CustomerRecordEntity resolveLinkedCustomer(String customerId, String customerName) {
+        String normalizedCustomerId = trimToNull(customerId);
+        String normalizedCustomerName = trimToNull(customerName);
+
+        if (normalizedCustomerId != null) {
+            return customerRecordRepository.findById(normalizedCustomerId)
+                    .orElseThrow(() -> new IllegalArgumentException("Customer not found for customerId: " + normalizedCustomerId));
+        }
+        if (normalizedCustomerName == null) {
+            return null;
+        }
+
+        List<CustomerRecordEntity> matches = customerRecordRepository.findByCustomerNameIgnoreCase(normalizedCustomerName);
+        if (matches.size() > 1) {
+            throw new IllegalArgumentException("Multiple customers found for name. Pass customerId.");
+        }
+        return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    private String mergeNotes(String existing, String next, String actor) {
+        String appended = trimToNull(next);
+        if (appended == null) {
+            return trimToNull(existing);
+        }
+        String prefix = "[ADDON by " + actor + " " + OffsetDateTime.now().toLocalTime().withNano(0) + "] ";
+        String candidate = trimToNull(existing);
+        String merged = candidate == null ? prefix + appended : candidate + " | " + prefix + appended;
+        return merged.length() > 500 ? merged.substring(0, 500) : merged;
+    }
+
+    private boolean shouldGenerateForDate(
+            CustomerRecordEntity customer,
+            LocalDate date,
+            String activeDaysCsv,
+            LocalDate startDate,
+            LocalDate endDate
+    ) {
+        return generationBlockReason(customer, date, activeDaysCsv, startDate, endDate) == null;
+    }
+
+    private String generationBlockReason(
+            CustomerRecordEntity customer,
+            LocalDate date,
+            String activeDaysCsv,
+            LocalDate startDate,
+            LocalDate endDate
+    ) {
+        if (customer == null) {
+            return "CUSTOMER_NOT_FOUND_OR_INACTIVE";
+        }
+        if (!customer.isActive()) {
+            return "CUSTOMER_INACTIVE";
+        }
+        if (!customer.isSubscriptionActive()) {
+            return "SUBSCRIPTION_NOT_ACTIVE";
+        }
+        if (startDate != null && date.isBefore(startDate)) {
+            return "BEFORE_START_DATE";
+        }
+        if (endDate != null && date.isAfter(endDate)) {
+            return "AFTER_END_DATE";
+        }
+        if (customer.getSubscriptionPausedUntil() != null && !date.isAfter(customer.getSubscriptionPausedUntil())) {
+            return "PAUSED_UNTIL_DATE";
+        }
+        Set<LocalDate> skippedDates = parseSkipDates(customer.getSubscriptionSkipDatesCsv());
+        if (skippedDates.contains(date)) {
+            return "SKIP_DATE";
+        }
+
+        EnumSet<DayOfWeek> lineDays = parseActiveDays(activeDaysCsv);
+        if (!lineDays.isEmpty() && !lineDays.contains(date.getDayOfWeek())) {
+            return "DAY_NOT_IN_ACTIVE_DAYS";
+        }
+
+        SubscriptionFrequency frequency = customer.getSubscriptionFrequency();
+        if (frequency == null || frequency == SubscriptionFrequency.DAILY) {
+            return null;
+        }
+        if (frequency == SubscriptionFrequency.WEEKLY) {
+            // Legacy customer-level frequency does not have a week-day selector.
+            // Keep generation daily here; weekly cadence should be configured using
+            // per-line activeDaysCsv in subscription lines.
+            return null;
+        }
+        return null;
+    }
+
+    private Set<LocalDate> parseSkipDates(String csv) {
+        Set<LocalDate> dates = new HashSet<>();
+        String raw = trimToNull(csv);
+        if (raw == null) {
+            return dates;
+        }
+        String[] tokens = raw.split("[,\\s]+");
+        for (String token : tokens) {
+            String normalized = trimToNull(token);
+            if (normalized == null) {
+                continue;
+            }
+            try {
+                dates.add(LocalDate.parse(normalized));
+            } catch (DateTimeParseException ignore) {
+                // Ignore malformed dates in stored CSV.
+            }
+        }
+        return dates;
+    }
+
+    private EnumSet<DayOfWeek> parseActiveDays(String csv) {
+        EnumSet<DayOfWeek> days = EnumSet.noneOf(DayOfWeek.class);
+        String raw = trimToNull(csv);
+        if (raw == null) {
+            return days;
+        }
+
+        String[] tokens = raw.split("[,\\s]+");
+        for (String token : tokens) {
+            DayOfWeek day = parseDay(token);
+            if (day != null) {
+                days.add(day);
+            }
+        }
+        return days;
+    }
+
+    private DayOfWeek parseDay(String token) {
+        String normalized = trimToNull(token);
+        if (normalized == null) return null;
+        normalized = normalized.toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "MON", "MONDAY" -> DayOfWeek.MONDAY;
+            case "TUE", "TUESDAY" -> DayOfWeek.TUESDAY;
+            case "WED", "WEDNESDAY" -> DayOfWeek.WEDNESDAY;
+            case "THU", "THURSDAY" -> DayOfWeek.THURSDAY;
+            case "FRI", "FRIDAY" -> DayOfWeek.FRIDAY;
+            case "SAT", "SATURDAY" -> DayOfWeek.SATURDAY;
+            case "SUN", "SUNDAY" -> DayOfWeek.SUNDAY;
+            default -> null;
+        };
+    }
+
+    private double roundTo2(double value) {
+        return Math.round(value * 100.0d) / 100.0d;
+    }
+
+    private double safeDouble(Double value) {
+        return value == null ? 0.0 : value;
+    }
+
+    private String buildSubscriptionSourceRef(
+            String customerId,
+            LocalDate date,
+            Shift shift,
+            ProductType productType,
+            LocalTime preferredTime
+    ) {
+        String timePart = preferredTime != null ? preferredTime.format(SOURCE_TIME) : "NA";
+        return "SUBSCRIPTION:"
+                + customerId
+                + ":"
+                + date
+                + ":"
+                + shift
+                + ":"
+                + productType
+                + ":"
+                + timePart;
+    }
+
+    private String buildSubscriptionNote(
+            CustomerRecordEntity customer,
+            Shift shift,
+            ProductType productType,
+            LocalTime preferredTime,
+            String activeDaysCsv,
+            LocalDate startDate,
+            LocalDate endDate
+    ) {
+        SubscriptionFrequency frequency = customer.getSubscriptionFrequency() == null
+                ? SubscriptionFrequency.DAILY
+                : customer.getSubscriptionFrequency();
+        String route = trimToNull(customer.getRouteName());
+        StringBuilder note = new StringBuilder("Auto-generated subscription task (")
+                .append(frequency)
+                .append(", ")
+                .append(shift)
+                .append(", ")
+                .append(productType)
+                .append(")");
+        if (preferredTime != null) {
+            note.append(" | Time: ").append(preferredTime);
+        }
+        if (trimToNull(activeDaysCsv) != null) {
+            note.append(" | Days: ").append(activeDaysCsv);
+        }
+        if (startDate != null || endDate != null) {
+            note.append(" | Window: ")
+                    .append(startDate != null ? startDate : "-")
+                    .append(" to ")
+                    .append(endDate != null ? endDate : "-");
+        }
+        if (customer.getSubscriptionPausedUntil() != null) {
+            note.append(" | PausedUntil: ").append(customer.getSubscriptionPausedUntil());
+        }
+        if (trimToNull(customer.getSubscriptionSkipDatesCsv()) != null) {
+            note.append(" | SkipDates: ").append(customer.getSubscriptionSkipDatesCsv());
+        }
+        if (route != null) {
+            note.append(" | Route: ").append(route);
+        }
+        return note.toString();
+    }
+
+    private Comparator<DeliveryTaskEntity> deliverySort() {
+        return Comparator.comparing((DeliveryTaskEntity row) -> sortable(row.getRouteName()))
+                .thenComparing(row -> row.getPreferredTime() != null ? row.getPreferredTime().toString() : "")
+                .thenComparing(row -> sortable(row.getCustomerName()))
+                .thenComparing(row -> (row.getProductType() != null ? row.getProductType() : ProductType.MILK).name())
+                .thenComparing(row -> row.getTaskShift() != null ? row.getTaskShift().name() : "")
+                .thenComparing(DeliveryTaskEntity::getDeliveryTaskId);
+    }
+
+    private String trimToNull(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String sortable(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeActor(String actorUsername) {
+        String normalized = trimToNull(actorUsername);
+        return normalized == null ? "unknown" : normalized;
+    }
+
+    private DeliveryTaskResponse toResponse(DeliveryTaskEntity entity) {
+        return DeliveryTaskResponse.builder()
+                .deliveryTaskId(entity.getDeliveryTaskId())
+                .taskDate(entity.getTaskDate())
+                .customerId(entity.getCustomerId())
+                .customerName(entity.getCustomerName())
+                .assignedToUsername(entity.getAssignedToUsername())
+                .assignedByUsername(entity.getAssignedByUsername())
+                .assignedAt(entity.getAssignedAt())
+                .routeName(entity.getRouteName())
+                .productType(entity.getProductType())
+                .taskShift(entity.getTaskShift())
+                .preferredTime(entity.getPreferredTime())
+                .plannedQtyLiters(entity.getPlannedQtyLiters())
+                .unitPrice(entity.getUnitPrice())
+                .paymentMode(entity.getPaymentMode())
+                .deliveredQtyLiters(entity.getDeliveredQtyLiters())
+                .status(entity.getStatus())
+                .autoGenerated(entity.isAutoGenerated())
+                .sourceRefId(entity.getSourceRefId())
+                .saleId(entity.getSaleId())
+                .saleRecordedAt(entity.getSaleRecordedAt())
+                .notes(entity.getNotes())
+                .createdBy(entity.getCreatedBy())
+                .completedBy(entity.getCompletedBy())
+                .completedAt(entity.getCompletedAt())
+                .createdAt(entity.getCreatedAt())
+                .updatedAt(entity.getUpdatedAt())
+                .build();
+    }
+
+    private DeliveryRunClosureResponse toRunClosureResponse(DeliveryRunClosureEntity entity) {
+        return DeliveryRunClosureResponse.builder()
+                .runClosureId(entity.getRunClosureId())
+                .date(entity.getDate())
+                .routeName(entity.getRouteName())
+                .shift(entity.getShift())
+                .totalStops(entity.getTotalStops())
+                .deliveredStops(entity.getDeliveredStops())
+                .pendingStops(entity.getPendingStops())
+                .skippedStops(entity.getSkippedStops())
+                .expectedCollection(entity.getExpectedCollection())
+                .actualCollection(entity.getActualCollection())
+                .variance(entity.getVariance())
+                .cashCollection(entity.getCashCollection())
+                .upiCollection(entity.getUpiCollection())
+                .otherCollection(entity.getOtherCollection())
+                .notes(entity.getNotes())
+                .closedBy(entity.getClosedBy())
+                .closedAt(entity.getClosedAt())
+                .createdAt(entity.getCreatedAt())
+                .updatedAt(entity.getUpdatedAt())
+                .build();
+    }
+
+    private static class DeliveryReconciliationAccumulator {
+        private final String deliveryUsername;
+        private long assignedTasks;
+        private long deliveredTasks;
+        private long skippedTasks;
+        private long pendingTasks;
+        private double plannedQty;
+        private double deliveredQty;
+        private double collectedAmount;
+        private double pendingAmount;
+
+        private DeliveryReconciliationAccumulator(String deliveryUsername) {
+            this.deliveryUsername = deliveryUsername;
+        }
+    }
+}

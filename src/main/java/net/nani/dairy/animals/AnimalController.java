@@ -26,6 +26,11 @@ public class AnimalController {
         return service.list(active, status);
     }
 
+    @GetMapping("/by-tag")
+    public AnimalResponse getAnimalByTag(@RequestParam String tag) {
+        return service.getByTag(tag);
+    }
+
     @GetMapping("/{animalId}")
     public AnimalResponse getAnimal(@PathVariable String animalId) {
         return service.getById(animalId);

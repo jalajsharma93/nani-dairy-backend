@@ -12,6 +12,8 @@ import lombok.Setter;
 import net.nani.dairy.sales.CustomerType;
 import net.nani.dairy.sales.SubscriptionFrequency;
 
+import java.time.LocalDate;
+
 @Getter
 @Setter
 @NoArgsConstructor
@@ -42,6 +44,14 @@ public class CreateCustomerRecordRequest {
     private Double dailySubscriptionQty;
 
     private SubscriptionFrequency subscriptionFrequency;
+
+    private LocalDate subscriptionPausedUntil;
+
+    @Size(max = 400)
+    private String subscriptionSkipDatesCsv;
+
+    @Positive
+    private Double defaultMilkUnitPrice;
 
     @NotNull
     private Boolean isActive;

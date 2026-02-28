@@ -63,6 +63,16 @@ public class AuthService {
                 .toList();
     }
 
+    public List<AuthUserResponse> listAssignableUsers(List<UserRole> roles) {
+        List<AuthUserEntity> users;
+        if (roles == null || roles.isEmpty()) {
+            users = authUserRepository.findByActiveTrueOrderByUsernameAsc();
+        } else {
+            users = authUserRepository.findByActiveTrueAndRoleInOrderByUsernameAsc(roles);
+        }
+        return users.stream().map(this::toResponse).toList();
+    }
+
     public List<AuthUserAuditResponse> listUserAudits(Integer limit) {
         int safeLimit = limit == null ? 100 : Math.max(1, Math.min(limit, 200));
         return authUserAuditRepository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, safeLimit))

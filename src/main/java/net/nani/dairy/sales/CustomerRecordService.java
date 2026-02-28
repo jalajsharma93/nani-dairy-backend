@@ -9,8 +9,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.TreeSet;
 import java.util.UUID;
 
 @Service
@@ -39,8 +42,15 @@ public class CustomerRecordService {
     }
 
     public CustomerRecordResponse create(CreateCustomerRecordRequest req) {
-        validateSubscription(req.getSubscriptionActive(), req.getDailySubscriptionQty(), req.getSubscriptionFrequency());
+        validateSubscription(
+                req.getSubscriptionActive(),
+                req.getDailySubscriptionQty(),
+                req.getSubscriptionFrequency(),
+                req.getSubscriptionPausedUntil(),
+                req.getSubscriptionSkipDatesCsv()
+        );
         boolean subscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
+        String normalizedSkipDates = normalizeSubscriptionSkipDatesCsv(req.getSubscriptionSkipDatesCsv());
 
         CustomerRecordEntity entity = CustomerRecordEntity.builder()
                 .customerId(buildId())
@@ -52,9 +62,12 @@ public class CustomerRecordService {
                 .subscriptionActive(subscriptionActive)
                 .dailySubscriptionQty(subscriptionActive ? req.getDailySubscriptionQty() : null)
                 .subscriptionFrequency(subscriptionActive ? req.getSubscriptionFrequency() : null)
+                .subscriptionPausedUntil(subscriptionActive ? req.getSubscriptionPausedUntil() : null)
+                .subscriptionSkipDatesCsv(subscriptionActive ? normalizedSkipDates : null)
                 .runningBalance(0.0)
                 .totalPaid(0.0)
                 .lastPayoutDate(null)
+                .defaultMilkUnitPrice(req.getDefaultMilkUnitPrice())
                 .isActive(Boolean.TRUE.equals(req.getIsActive()))
                 .notes(trimToNull(req.getNotes()))
                 .build();
@@ -63,8 +76,15 @@ public class CustomerRecordService {
     }
 
     public CustomerRecordResponse update(String customerId, UpdateCustomerRecordRequest req) {
-        validateSubscription(req.getSubscriptionActive(), req.getDailySubscriptionQty(), req.getSubscriptionFrequency());
+        validateSubscription(
+                req.getSubscriptionActive(),
+                req.getDailySubscriptionQty(),
+                req.getSubscriptionFrequency(),
+                req.getSubscriptionPausedUntil(),
+                req.getSubscriptionSkipDatesCsv()
+        );
         boolean subscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
+        String normalizedSkipDates = normalizeSubscriptionSkipDatesCsv(req.getSubscriptionSkipDatesCsv());
         CustomerRecordEntity entity = repository.findById(customerId)
                 .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
 
@@ -76,6 +96,9 @@ public class CustomerRecordService {
         entity.setSubscriptionActive(subscriptionActive);
         entity.setDailySubscriptionQty(subscriptionActive ? req.getDailySubscriptionQty() : null);
         entity.setSubscriptionFrequency(subscriptionActive ? req.getSubscriptionFrequency() : null);
+        entity.setSubscriptionPausedUntil(subscriptionActive ? req.getSubscriptionPausedUntil() : null);
+        entity.setSubscriptionSkipDatesCsv(subscriptionActive ? normalizedSkipDates : null);
+        entity.setDefaultMilkUnitPrice(req.getDefaultMilkUnitPrice());
         entity.setActive(Boolean.TRUE.equals(req.getIsActive()));
         entity.setNotes(trimToNull(req.getNotes()));
         if (entity.getRunningBalance() == null) {
@@ -122,10 +145,15 @@ public class CustomerRecordService {
     private void validateSubscription(
             Boolean subscriptionActive,
             Double dailySubscriptionQty,
-            SubscriptionFrequency subscriptionFrequency
+            SubscriptionFrequency subscriptionFrequency,
+            LocalDate subscriptionPausedUntil,
+            String subscriptionSkipDatesCsv
     ) {
         boolean isSubscription = Boolean.TRUE.equals(subscriptionActive);
         if (!isSubscription) {
+            if (subscriptionPausedUntil != null || trimToNull(subscriptionSkipDatesCsv) != null) {
+                throw new IllegalArgumentException("Pause/skip dates are allowed only when subscriptionActive is true");
+            }
             return;
         }
         if (dailySubscriptionQty == null || dailySubscriptionQty <= 0) {
@@ -134,6 +162,7 @@ public class CustomerRecordService {
         if (subscriptionFrequency == null) {
             throw new IllegalArgumentException("subscriptionFrequency is required when subscriptionActive is true");
         }
+        normalizeSubscriptionSkipDatesCsv(subscriptionSkipDatesCsv);
     }
 
     private String buildId() {
@@ -160,6 +189,40 @@ public class CustomerRecordService {
         return value == null ? "" : value.trim().toLowerCase();
     }
 
+    private String normalizeSubscriptionSkipDatesCsv(String value) {
+        String raw = trimToNull(value);
+        if (raw == null) {
+            return null;
+        }
+
+        TreeSet<LocalDate> dates = new TreeSet<>();
+        String[] tokens = raw.split("[,\\s]+");
+        for (String token : tokens) {
+            String normalized = trimToNull(token);
+            if (normalized == null) {
+                continue;
+            }
+            try {
+                dates.add(LocalDate.parse(normalized));
+            } catch (DateTimeParseException ignore) {
+                // Ignore bad tokens; UI/backend should keep only valid ISO dates.
+            }
+        }
+        if (dates.isEmpty()) {
+            return null;
+        }
+
+        List<String> isoDates = new ArrayList<>();
+        for (LocalDate date : dates) {
+            isoDates.add(date.toString());
+        }
+        String joined = String.join(",", isoDates);
+        if (joined.length() > 400) {
+            throw new IllegalArgumentException("subscriptionSkipDatesCsv is too long");
+        }
+        return joined;
+    }
+
     private double safeDouble(Double value) {
         return value == null ? 0.0 : value;
     }
@@ -175,9 +238,12 @@ public class CustomerRecordService {
                 .subscriptionActive(entity.isSubscriptionActive())
                 .dailySubscriptionQty(entity.getDailySubscriptionQty())
                 .subscriptionFrequency(entity.getSubscriptionFrequency())
+                .subscriptionPausedUntil(entity.getSubscriptionPausedUntil())
+                .subscriptionSkipDatesCsv(entity.getSubscriptionSkipDatesCsv())
                 .runningBalance(safeDouble(entity.getRunningBalance()))
                 .totalPaid(safeDouble(entity.getTotalPaid()))
                 .lastPayoutDate(entity.getLastPayoutDate())
+                .defaultMilkUnitPrice(entity.getDefaultMilkUnitPrice())
                 .isActive(entity.isActive())
                 .notes(entity.getNotes())
                 .createdAt(entity.getCreatedAt())

@@ -44,6 +44,16 @@ public class AnimalService {
         return toResponse(entity);
     }
 
+    public AnimalResponse getByTag(String tag) {
+        String normalizedTag = normalize(tag);
+        if (normalizedTag == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Tag is required");
+        }
+        var entity = repo.findByTagIgnoreCase(normalizedTag)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Animal not found for tag"));
+        return toResponse(entity);
+    }
+
     public AnimalResponse create(CreateAnimalRequest req) {
         validateDates(req.getDateOfBirth(), req.getWeaningDate(), req.getLastWeightDate());
         var normalizedTag = req.getTag().trim();

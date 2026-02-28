@@ -24,6 +24,7 @@ public class CreateFeedSopTaskRequest {
 
     private String details;
     private UserRole assignedRole;
+    private String assignedToUsername;
     private FeedSopTaskPriority priority;
     private LocalTime dueTime;
 }

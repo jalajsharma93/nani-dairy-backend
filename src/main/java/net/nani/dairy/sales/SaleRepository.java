@@ -27,4 +27,12 @@ public interface SaleRepository extends JpaRepository<SaleEntity, String> {
             CustomerType customerType,
             ProductType productType
     );
+
+    List<SaleEntity> findByDispatchDateBetweenAndCustomerTypeAndCustomerNameIgnoreCaseAndProductTypeAndReconciledFalse(
+            LocalDate dispatchDateStart,
+            LocalDate dispatchDateEnd,
+            CustomerType customerType,
+            String customerName,
+            ProductType productType
+    );
 }

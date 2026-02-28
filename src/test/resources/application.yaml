@@ -1,0 +1,14 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:nani_test_db;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
+    driverClassName: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+app:
+  auth:
+    jwt-secret: "nani-dairy-test-secret-change-before-production-123456"
+    jwt-exp-hours: 24

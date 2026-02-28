@@ -5,6 +5,10 @@ import lombok.RequiredArgsConstructor;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
+import net.nani.dairy.sales.dto.MonthCloseSettlementBulkRequest;
+import net.nani.dairy.sales.dto.MonthCloseSettlementBulkResponse;
+import net.nani.dairy.sales.dto.MonthCloseSettlementRequest;
+import net.nani.dairy.sales.dto.MonthCloseSettlementResponse;
 import net.nani.dairy.sales.dto.ReconcileSaleRequest;
 import net.nani.dairy.sales.dto.SaleComplianceOverrideAuditResponse;
 import net.nani.dairy.sales.dto.SaleResponse;
@@ -99,6 +103,33 @@ public class SaleController {
             Authentication authentication
     ) {
         return saleService.reconcile(saleId, req, actor(authentication));
+    }
+
+    @PostMapping("/month-close")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public MonthCloseSettlementResponse monthClose(
+            @Valid @RequestBody MonthCloseSettlementRequest req,
+            Authentication authentication
+    ) {
+        return saleService.monthCloseSettlement(req, actor(authentication));
+    }
+
+    @PostMapping("/month-close/bulk")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public MonthCloseSettlementBulkResponse monthCloseBulk(
+            @Valid @RequestBody MonthCloseSettlementBulkRequest req,
+            Authentication authentication
+    ) {
+        return saleService.monthCloseSettlementBulk(req, actor(authentication));
+    }
+
+    @PostMapping("/month-close/bulk/preview")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public MonthCloseSettlementBulkResponse monthCloseBulkPreview(
+            @Valid @RequestBody MonthCloseSettlementBulkRequest req,
+            Authentication authentication
+    ) {
+        return saleService.monthCloseSettlementBulkPreview(req, actor(authentication));
     }
 
     @GetMapping("/delivery-list")

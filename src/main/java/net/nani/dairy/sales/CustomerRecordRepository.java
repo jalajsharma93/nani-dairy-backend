@@ -6,5 +6,7 @@ import java.util.List;
 
 public interface CustomerRecordRepository extends JpaRepository<CustomerRecordEntity, String> {
     List<CustomerRecordEntity> findByIsActive(boolean isActive);
+    List<CustomerRecordEntity> findByIsActiveAndSubscriptionActive(boolean isActive, boolean subscriptionActive);
     List<CustomerRecordEntity> findByCustomerNameIgnoreCase(String customerName);
+    List<CustomerRecordEntity> findByCustomerNameIgnoreCaseAndCustomerType(String customerName, CustomerType customerType);
 }

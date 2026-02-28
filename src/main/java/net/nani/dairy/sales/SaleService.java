@@ -10,6 +10,12 @@ import net.nani.dairy.milk.QcStatus;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
+import net.nani.dairy.sales.dto.MonthCloseSettlementBulkItemRequest;
+import net.nani.dairy.sales.dto.MonthCloseSettlementBulkItemResponse;
+import net.nani.dairy.sales.dto.MonthCloseSettlementBulkRequest;
+import net.nani.dairy.sales.dto.MonthCloseSettlementBulkResponse;
+import net.nani.dairy.sales.dto.MonthCloseSettlementRequest;
+import net.nani.dairy.sales.dto.MonthCloseSettlementResponse;
 import net.nani.dairy.sales.dto.ReconcileSaleRequest;
 import net.nani.dairy.sales.dto.SaleComplianceOverrideAuditResponse;
 import net.nani.dairy.sales.dto.SaleResponse;
@@ -19,9 +25,11 @@ import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
 import net.nani.dairy.sales.dto.UpdateSaleRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -41,6 +49,7 @@ public class SaleService {
     private final AnimalRepository animalRepository;
     private final CustomerRecordRepository customerRecordRepository;
     private final SaleComplianceOverrideAuditRepository saleComplianceOverrideAuditRepository;
+    private final TransactionTemplate transactionTemplate;
 
     public List<SaleResponse> list(LocalDate date, CustomerType customerType, ProductType productType) {
         List<SaleEntity> rows;
@@ -392,6 +401,358 @@ public class SaleService {
         return toResponse(saleRepository.save(entity));
     }
 
+    @Transactional
+    public MonthCloseSettlementResponse monthCloseSettlement(MonthCloseSettlementRequest req, String actorUsername) {
+        return monthCloseSettlementInternal(req, actorUsername, OffsetDateTime.now());
+    }
+
+    public MonthCloseSettlementBulkResponse monthCloseSettlementBulk(
+            MonthCloseSettlementBulkRequest req,
+            String actorUsername
+    ) {
+        validateMonthCloseBulkRequest(req);
+
+        String actor = normalizeActor(actorUsername);
+        String bulkNote = trimToNull(req.getNote());
+        OffsetDateTime processedAt = OffsetDateTime.now();
+
+        List<MonthCloseSettlementBulkItemResponse> results = new ArrayList<>();
+        int succeeded = 0;
+
+        for (MonthCloseSettlementBulkItemRequest item : req.getItems()) {
+            if (item == null) {
+                results.add(
+                        MonthCloseSettlementBulkItemResponse.builder()
+                                .success(false)
+                                .message("Invalid item: null")
+                                .build()
+                );
+                continue;
+            }
+
+            MonthCloseSettlementRequest itemRequest = MonthCloseSettlementRequest.builder()
+                    .dateFrom(req.getDateFrom())
+                    .dateTo(req.getDateTo())
+                    .customerType(item.getCustomerType())
+                    .customerId(item.getCustomerId())
+                    .customerName(item.getCustomerName())
+                    .payoutAmount(item.getPayoutAmount())
+                    .reconcileOpenCooperative(item.getReconcileOpenCooperative())
+                    .note(bulkNote)
+                    .build();
+
+            try {
+                MonthCloseSettlementResponse closeResult = transactionTemplate.execute(
+                        status -> monthCloseSettlementInternal(itemRequest, actor, OffsetDateTime.now())
+                );
+                if (closeResult == null) {
+                    throw new IllegalStateException("month close returned empty response");
+                }
+                results.add(
+                        MonthCloseSettlementBulkItemResponse.builder()
+                                .customerType(closeResult.getCustomerType())
+                                .customerId(closeResult.getCustomerId())
+                                .customerName(closeResult.getCustomerName())
+                                .success(true)
+                                .message("OK")
+                                .reconciliationApplied(closeResult.isReconciliationApplied())
+                                .reconciledSales(closeResult.getReconciledSales())
+                                .payoutRecorded(closeResult.getPayoutRecorded())
+                                .customerBalanceAfter(closeResult.getCustomerBalanceAfter())
+                                .build()
+                );
+                succeeded += 1;
+            } catch (Exception e) {
+                String message = trimToNull(e.getMessage());
+                if (message == null) {
+                    message = "Month close failed";
+                }
+                if (message.length() > 300) {
+                    message = message.substring(0, 300);
+                }
+                results.add(
+                        MonthCloseSettlementBulkItemResponse.builder()
+                                .customerType(item.getCustomerType())
+                                .customerId(trimToNull(item.getCustomerId()))
+                                .customerName(trimToNull(item.getCustomerName()))
+                                .success(false)
+                                .message(message)
+                                .reconciliationApplied(false)
+                                .reconciledSales(0)
+                                .payoutRecorded(0.0)
+                                .customerBalanceAfter(null)
+                                .build()
+                );
+            }
+        }
+
+        return MonthCloseSettlementBulkResponse.builder()
+                .dateFrom(req.getDateFrom())
+                .dateTo(req.getDateTo())
+                .requestedCount(req.getItems().size())
+                .succeededCount(succeeded)
+                .failedCount(req.getItems().size() - succeeded)
+                .processedBy(actor)
+                .processedAt(processedAt)
+                .note(bulkNote)
+                .results(results)
+                .build();
+    }
+
+    public MonthCloseSettlementBulkResponse monthCloseSettlementBulkPreview(
+            MonthCloseSettlementBulkRequest req,
+            String actorUsername
+    ) {
+        validateMonthCloseBulkRequest(req);
+
+        String actor = normalizeActor(actorUsername);
+        String bulkNote = trimToNull(req.getNote());
+        OffsetDateTime processedAt = OffsetDateTime.now();
+
+        List<MonthCloseSettlementBulkItemResponse> results = new ArrayList<>();
+        int succeeded = 0;
+
+        for (MonthCloseSettlementBulkItemRequest item : req.getItems()) {
+            if (item == null) {
+                results.add(
+                        MonthCloseSettlementBulkItemResponse.builder()
+                                .success(false)
+                                .message("Invalid item: null")
+                                .build()
+                );
+                continue;
+            }
+            try {
+                MonthCloseSettlementBulkItemResponse preview = previewMonthCloseBulkItem(req, item);
+                results.add(preview);
+                if (preview.isSuccess()) {
+                    succeeded += 1;
+                }
+            } catch (Exception e) {
+                String message = trimToNull(e.getMessage());
+                if (message == null) {
+                    message = "Month close preview failed";
+                }
+                if (message.length() > 300) {
+                    message = message.substring(0, 300);
+                }
+                results.add(
+                        MonthCloseSettlementBulkItemResponse.builder()
+                                .customerType(item.getCustomerType())
+                                .customerId(trimToNull(item.getCustomerId()))
+                                .customerName(trimToNull(item.getCustomerName()))
+                                .success(false)
+                                .message(message)
+                                .reconciliationApplied(false)
+                                .reconciledSales(0)
+                                .payoutRecorded(0.0)
+                                .customerBalanceAfter(null)
+                                .build()
+                );
+            }
+        }
+
+        return MonthCloseSettlementBulkResponse.builder()
+                .dateFrom(req.getDateFrom())
+                .dateTo(req.getDateTo())
+                .requestedCount(req.getItems().size())
+                .succeededCount(succeeded)
+                .failedCount(req.getItems().size() - succeeded)
+                .processedBy(actor)
+                .processedAt(processedAt)
+                .note(bulkNote)
+                .results(results)
+                .build();
+    }
+
+    private MonthCloseSettlementResponse monthCloseSettlementInternal(
+            MonthCloseSettlementRequest req,
+            String actorUsername,
+            OffsetDateTime closedAt
+    ) {
+        if (req.getDateFrom() == null || req.getDateTo() == null) {
+            throw new IllegalArgumentException("dateFrom and dateTo are required");
+        }
+        if (req.getDateTo().isBefore(req.getDateFrom())) {
+            throw new IllegalArgumentException("dateTo cannot be before dateFrom");
+        }
+        if (req.getCustomerType() == null) {
+            throw new IllegalArgumentException("customerType is required");
+        }
+
+        String normalizedCustomerName = trimToNull(req.getCustomerName());
+        if (normalizedCustomerName == null) {
+            throw new IllegalArgumentException("customerName is required");
+        }
+
+        double payoutAmount = req.getPayoutAmount() == null ? 0.0 : req.getPayoutAmount();
+        if (payoutAmount < 0) {
+            throw new IllegalArgumentException("payoutAmount cannot be negative");
+        }
+
+        String normalizedCustomerId = trimToNull(req.getCustomerId());
+        String actor = normalizeActor(actorUsername);
+        String note = trimToNull(req.getNote());
+
+        boolean reconciliationApplied =
+                req.getCustomerType() == CustomerType.COOPERATIVE
+                        && Boolean.TRUE.equals(req.getReconcileOpenCooperative());
+        int reconciledSales = 0;
+
+        if (reconciliationApplied) {
+            List<SaleEntity> openRows =
+                    saleRepository.findByDispatchDateBetweenAndCustomerTypeAndCustomerNameIgnoreCaseAndProductTypeAndReconciledFalse(
+                            req.getDateFrom(),
+                            req.getDateTo(),
+                            req.getCustomerType(),
+                            normalizedCustomerName,
+                            ProductType.MILK
+                    );
+
+            String defaultNote = "Month close " + req.getDateFrom() + " to " + req.getDateTo();
+            for (SaleEntity row : openRows) {
+                row.setReconciled(true);
+                row.setReconciledAt(closedAt);
+                row.setReconciledBy(actor);
+                if (note != null) {
+                    row.setReconciliationNote(note);
+                } else if (trimToNull(row.getReconciliationNote()) == null) {
+                    row.setReconciliationNote(defaultNote);
+                }
+            }
+            if (!openRows.isEmpty()) {
+                saleRepository.saveAll(openRows);
+            }
+            reconciledSales = openRows.size();
+        }
+
+        CustomerRecordEntity customer = resolveCustomerForMonthClose(
+                normalizedCustomerId,
+                normalizedCustomerName,
+                req.getCustomerType()
+        );
+
+        double payoutRecorded = 0;
+        Double customerBalanceAfter = customer != null ? safeDouble(customer.getRunningBalance()) : null;
+        if (payoutAmount > 0) {
+            if (customer == null) {
+                throw new IllegalArgumentException("Customer record not found for payout");
+            }
+
+            double currentBalance = safeDouble(customer.getRunningBalance());
+            if (payoutAmount > currentBalance) {
+                throw new IllegalArgumentException("payout amount cannot exceed current running balance");
+            }
+
+            double nextBalance = currentBalance - payoutAmount;
+            customer.setRunningBalance(nextBalance);
+            customer.setTotalPaid(safeDouble(customer.getTotalPaid()) + payoutAmount);
+            customer.setLastPayoutDate(req.getDateTo());
+
+            if (note != null) {
+                String prefix = "[MONTH_CLOSE_PAYOUT " + req.getDateTo() + " " + payoutAmount + "]";
+                String existing = trimToNull(customer.getNotes());
+                String combined = existing == null ? prefix + " " + note : existing + " | " + prefix + " " + note;
+                customer.setNotes(combined.length() > 500 ? combined.substring(0, 500) : combined);
+            }
+
+            customerRecordRepository.save(customer);
+            payoutRecorded = payoutAmount;
+            customerBalanceAfter = nextBalance;
+        }
+
+        return MonthCloseSettlementResponse.builder()
+                .dateFrom(req.getDateFrom())
+                .dateTo(req.getDateTo())
+                .customerType(req.getCustomerType())
+                .customerId(customer != null ? customer.getCustomerId() : normalizedCustomerId)
+                .customerName(normalizedCustomerName)
+                .reconciliationApplied(reconciliationApplied)
+                .reconciledSales(reconciledSales)
+                .payoutRecorded(payoutRecorded)
+                .customerBalanceAfter(customerBalanceAfter)
+                .closedBy(actor)
+                .closedAt(closedAt)
+                .note(note)
+                .build();
+    }
+
+    private MonthCloseSettlementBulkItemResponse previewMonthCloseBulkItem(
+            MonthCloseSettlementBulkRequest request,
+            MonthCloseSettlementBulkItemRequest item
+    ) {
+        if (item.getCustomerType() == null) {
+            throw new IllegalArgumentException("customerType is required");
+        }
+        String normalizedCustomerName = trimToNull(item.getCustomerName());
+        if (normalizedCustomerName == null) {
+            throw new IllegalArgumentException("customerName is required");
+        }
+        double payoutAmount = item.getPayoutAmount() == null ? 0.0 : item.getPayoutAmount();
+        if (payoutAmount < 0) {
+            throw new IllegalArgumentException("payoutAmount cannot be negative");
+        }
+
+        String normalizedCustomerId = trimToNull(item.getCustomerId());
+        boolean reconciliationApplied =
+                item.getCustomerType() == CustomerType.COOPERATIVE
+                        && Boolean.TRUE.equals(item.getReconcileOpenCooperative());
+
+        int reconciledSales = 0;
+        if (reconciliationApplied) {
+            reconciledSales = saleRepository
+                    .findByDispatchDateBetweenAndCustomerTypeAndCustomerNameIgnoreCaseAndProductTypeAndReconciledFalse(
+                            request.getDateFrom(),
+                            request.getDateTo(),
+                            item.getCustomerType(),
+                            normalizedCustomerName,
+                            ProductType.MILK
+                    )
+                    .size();
+        }
+
+        CustomerRecordEntity customer = resolveCustomerForMonthClose(
+                normalizedCustomerId,
+                normalizedCustomerName,
+                item.getCustomerType()
+        );
+        Double customerBalanceAfter = customer != null ? safeDouble(customer.getRunningBalance()) : null;
+        if (payoutAmount > 0) {
+            if (customer == null) {
+                throw new IllegalArgumentException("Customer record not found for payout");
+            }
+            double currentBalance = safeDouble(customer.getRunningBalance());
+            if (payoutAmount > currentBalance) {
+                throw new IllegalArgumentException("payout amount cannot exceed current running balance");
+            }
+            customerBalanceAfter = currentBalance - payoutAmount;
+        }
+
+        return MonthCloseSettlementBulkItemResponse.builder()
+                .customerType(item.getCustomerType())
+                .customerId(customer != null ? customer.getCustomerId() : normalizedCustomerId)
+                .customerName(normalizedCustomerName)
+                .success(true)
+                .message("PREVIEW")
+                .reconciliationApplied(reconciliationApplied)
+                .reconciledSales(reconciledSales)
+                .payoutRecorded(payoutAmount > 0 ? payoutAmount : 0.0)
+                .customerBalanceAfter(customerBalanceAfter)
+                .build();
+    }
+
+    private void validateMonthCloseBulkRequest(MonthCloseSettlementBulkRequest req) {
+        if (req.getDateFrom() == null || req.getDateTo() == null) {
+            throw new IllegalArgumentException("dateFrom and dateTo are required");
+        }
+        if (req.getDateTo().isBefore(req.getDateFrom())) {
+            throw new IllegalArgumentException("dateTo cannot be before dateFrom");
+        }
+        if (req.getItems() == null || req.getItems().isEmpty()) {
+            throw new IllegalArgumentException("items are required");
+        }
+    }
+
     public List<DeliveryChecklistItemResponse> deliveryList(LocalDate date) {
         return saleRepository
                 .findByDispatchDate(date)
@@ -453,6 +814,34 @@ public class SaleService {
         }
 
         return toDeliveryChecklistItemResponse(saleRepository.save(entity));
+    }
+
+    private CustomerRecordEntity resolveCustomerForMonthClose(
+            String customerId,
+            String customerName,
+            CustomerType customerType
+    ) {
+        if (customerId != null) {
+            CustomerRecordEntity customer = customerRecordRepository.findById(customerId)
+                    .orElseThrow(() -> new IllegalArgumentException("Customer not found for customerId: " + customerId));
+            if (customer.getCustomerType() != customerType) {
+                throw new IllegalArgumentException("customerId does not match customerType");
+            }
+            if (!sortable(customer.getCustomerName()).equals(sortable(customerName))) {
+                throw new IllegalArgumentException("customerId does not match customerName");
+            }
+            return customer;
+        }
+
+        List<CustomerRecordEntity> matches =
+                customerRecordRepository.findByCustomerNameIgnoreCaseAndCustomerType(customerName, customerType);
+        if (matches.isEmpty()) {
+            return null;
+        }
+        if (matches.size() > 1) {
+            throw new IllegalArgumentException("Multiple customers found for name and type. Pass customerId.");
+        }
+        return matches.get(0);
     }
 
     private CustomerRecordEntity resolveLinkedCustomer(String customerId, String customerName) {

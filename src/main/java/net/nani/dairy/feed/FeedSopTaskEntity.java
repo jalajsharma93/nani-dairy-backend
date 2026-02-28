@@ -34,6 +34,15 @@ public class FeedSopTaskEntity {
     @Column(name = "assigned_role", length = 32, nullable = false)
     private UserRole assignedRole;
 
+    @Column(name = "assigned_to_username", length = 120)
+    private String assignedToUsername;
+
+    @Column(name = "assigned_by_username", length = 120)
+    private String assignedByUsername;
+
+    @Column(name = "assigned_at")
+    private LocalDateTime assignedAt;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "priority", length = 16, nullable = false)
     private FeedSopTaskPriority priority;

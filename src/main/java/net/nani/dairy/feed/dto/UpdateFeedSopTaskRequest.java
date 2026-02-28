@@ -28,6 +28,8 @@ public class UpdateFeedSopTaskRequest {
     @NotNull
     private UserRole assignedRole;
 
+    private String assignedToUsername;
+
     @NotNull
     private FeedSopTaskPriority priority;
 

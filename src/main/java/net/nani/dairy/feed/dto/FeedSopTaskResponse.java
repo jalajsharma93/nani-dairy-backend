@@ -20,6 +20,9 @@ public class FeedSopTaskResponse {
     private String title;
     private String details;
     private UserRole assignedRole;
+    private String assignedToUsername;
+    private String assignedByUsername;
+    private LocalDateTime assignedAt;
     private FeedSopTaskPriority priority;
     private FeedSopTaskStatus status;
     private LocalTime dueTime;

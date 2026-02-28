@@ -44,6 +44,12 @@ public class AuthController {
         return authService.listUsers();
     }
 
+    @GetMapping("/users/assignable")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','FEED_MANAGER')")
+    public List<AuthUserResponse> listAssignableUsers(@RequestParam(required = false) List<UserRole> roles) {
+        return authService.listAssignableUsers(roles);
+    }
+
     @PostMapping("/users")
     @PreAuthorize("hasRole('ADMIN')")
     public AuthUserResponse createUser(@Valid @RequestBody CreateAuthUserRequest req, Authentication authentication) {

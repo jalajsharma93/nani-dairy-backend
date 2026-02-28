@@ -61,6 +61,12 @@ public class CustomerRecordEntity {
     @Column(name = "subscription_frequency", length = 20)
     private SubscriptionFrequency subscriptionFrequency;
 
+    @Column(name = "subscription_paused_until")
+    private LocalDate subscriptionPausedUntil;
+
+    @Column(name = "subscription_skip_dates_csv", length = 400)
+    private String subscriptionSkipDatesCsv;
+
     @Column(name = "running_balance")
     private Double runningBalance;
 
@@ -69,6 +75,9 @@ public class CustomerRecordEntity {
 
     @Column(name = "last_payout_date")
     private LocalDate lastPayoutDate;
+
+    @Column(name = "default_milk_unit_price")
+    private Double defaultMilkUnitPrice;
 
     @Column(name = "is_active", nullable = false)
     private boolean isActive;
