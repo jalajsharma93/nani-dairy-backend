@@ -4,6 +4,7 @@ package net.nani.dairy.milk.dto;
 import net.nani.dairy.milk.QcStatus;
 import net.nani.dairy.milk.Shift;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.*;
 
@@ -23,6 +24,13 @@ public class UpdateMilkBatchQcRequest {
     @NotNull
     @Getter
     private QcStatus qcStatus;
+
+    @Getter
+    private Boolean overrideRecommendedStatus;
+
+    @Size(max = 700)
+    @Getter
+    private String overrideReason;
 
     public LocalDate getDate() {
         return date != null ? date : LocalDate.now();
