@@ -24,4 +24,9 @@ public interface EmployeeAttendanceRepository extends JpaRepository<EmployeeAtte
             LocalDate attendanceDate,
             Shift shift
     );
+
+    List<EmployeeAttendanceEntity> findByAttendanceDateBetweenOrderByAttendanceDateAscEmployeeIdAsc(
+            LocalDate dateFrom,
+            LocalDate dateTo
+    );
 }

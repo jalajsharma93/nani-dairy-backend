@@ -3,14 +3,19 @@ package net.nani.dairy.employees;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import net.nani.dairy.employees.dto.BulkUpsertEmployeeAttendanceRequest;
+import net.nani.dairy.employees.dto.EmployeeAttendanceMonthlyReportResponse;
 import net.nani.dairy.employees.dto.EmployeeAttendanceResponse;
 import net.nani.dairy.employees.dto.UpsertEmployeeAttendanceRequest;
 import net.nani.dairy.milk.Shift;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -50,6 +55,67 @@ public class EmployeeAttendanceController {
             Authentication authentication
     ) {
         return attendanceService.bulkUpsert(req.getEntries(), actor(authentication));
+    }
+
+    @GetMapping("/monthly")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public EmployeeAttendanceMonthlyReportResponse monthlyReport(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) Boolean includeInactive,
+            @RequestParam(required = false) SalaryComputationMode salaryMode,
+            @RequestParam(required = false) Double fullTimeDailyRate,
+            @RequestParam(required = false) Double partTimeDailyRate,
+            @RequestParam(required = false) Double fullTimeShiftRate,
+            @RequestParam(required = false) Double partTimeShiftRate,
+            @RequestParam(required = false) Double hourlyRate,
+            @RequestParam(required = false) Double overtimeHourlyRate,
+            @RequestParam(required = false) Double standardHoursPerDay
+    ) {
+        return attendanceService.monthlyReport(
+                month,
+                includeInactive,
+                salaryMode,
+                fullTimeDailyRate,
+                partTimeDailyRate,
+                fullTimeShiftRate,
+                partTimeShiftRate,
+                hourlyRate,
+                overtimeHourlyRate,
+                standardHoursPerDay
+        );
+    }
+
+    @GetMapping(value = "/monthly/export", produces = "text/csv")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public ResponseEntity<String> monthlyReportExport(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) Boolean includeInactive,
+            @RequestParam(required = false) SalaryComputationMode salaryMode,
+            @RequestParam(required = false) Double fullTimeDailyRate,
+            @RequestParam(required = false) Double partTimeDailyRate,
+            @RequestParam(required = false) Double fullTimeShiftRate,
+            @RequestParam(required = false) Double partTimeShiftRate,
+            @RequestParam(required = false) Double hourlyRate,
+            @RequestParam(required = false) Double overtimeHourlyRate,
+            @RequestParam(required = false) Double standardHoursPerDay
+    ) {
+        String effectiveMonth = (month == null || month.isBlank()) ? LocalDate.now().toString().substring(0, 7) : month;
+        String csv = attendanceService.monthlyReportCsv(
+                month,
+                includeInactive,
+                salaryMode,
+                fullTimeDailyRate,
+                partTimeDailyRate,
+                fullTimeShiftRate,
+                partTimeShiftRate,
+                hourlyRate,
+                overtimeHourlyRate,
+                standardHoursPerDay
+        );
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"attendance-" + effectiveMonth + ".csv\"")
+                .contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
+                .body(csv);
     }
 
     private String actor(Authentication authentication) {

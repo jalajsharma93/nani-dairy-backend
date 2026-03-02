@@ -13,6 +13,9 @@ app:
   auth:
     jwt-secret: "nani-dairy-dev-secret-change-this-before-production-123456"
     jwt-exp-hours: 24
+  delivery:
+    day-planner-enabled: true
+    day-planner-cron: "0 */30 * * * *"
 
 logging:
   level:

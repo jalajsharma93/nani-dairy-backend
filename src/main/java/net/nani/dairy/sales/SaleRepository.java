@@ -8,6 +8,13 @@ import java.util.List;
 public interface SaleRepository extends JpaRepository<SaleEntity, String> {
     List<SaleEntity> findByDispatchDate(LocalDate dispatchDate);
     List<SaleEntity> findByDispatchDateBetween(LocalDate dispatchDateStart, LocalDate dispatchDateEnd);
+    List<SaleEntity> findByDispatchDateBetweenAndCustomerId(LocalDate dispatchDateStart, LocalDate dispatchDateEnd, String customerId);
+    List<SaleEntity> findByDispatchDateBetweenAndCustomerTypeAndCustomerNameIgnoreCase(
+            LocalDate dispatchDateStart,
+            LocalDate dispatchDateEnd,
+            CustomerType customerType,
+            String customerName
+    );
 
     List<SaleEntity> findByCustomerType(CustomerType customerType);
 

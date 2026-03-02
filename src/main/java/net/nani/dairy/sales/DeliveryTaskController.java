@@ -5,11 +5,14 @@ import lombok.RequiredArgsConstructor;
 import net.nani.dairy.sales.dto.AddDeliveryTaskAddonRequest;
 import net.nani.dairy.sales.dto.DeliveryReconciliationRowResponse;
 import net.nani.dairy.sales.dto.CreateDeliveryTaskRequest;
+import net.nani.dairy.sales.dto.DeliveryDayPlanTriggerResponse;
 import net.nani.dairy.sales.dto.CreateDeliveryRunClosureRequest;
 import net.nani.dairy.sales.dto.DeliveryRunClosureResponse;
 import net.nani.dairy.sales.dto.DeliveryTaskResponse;
 import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskAssigneeRequest;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkRequest;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusRequest;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -78,6 +81,19 @@ public class DeliveryTaskController {
         );
     }
 
+    @PostMapping("/bulk-status")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','WORKER','DELIVERY')")
+    public UpdateDeliveryTaskStatusBulkResponse bulkUpdateStatus(
+            @Valid @RequestBody UpdateDeliveryTaskStatusBulkRequest req,
+            Authentication authentication
+    ) {
+        return deliveryTaskService.bulkUpdateStatus(
+                req,
+                actor(authentication),
+                hasAnyRole(authentication, "ADMIN", "MANAGER")
+        );
+    }
+
     @PostMapping("/{deliveryTaskId}/assign")
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
     public DeliveryTaskResponse assign(
@@ -103,6 +119,20 @@ public class DeliveryTaskController {
         return deliveryTaskService.list(effectiveDate, null, actor(authentication), true);
     }
 
+    @PostMapping("/day-plan")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public DeliveryDayPlanTriggerResponse triggerDayPlan(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(defaultValue = "true") boolean autoAssign,
+            Authentication authentication
+    ) {
+        return deliveryTaskService.triggerDayPlan(
+                date != null ? date : LocalDate.now(),
+                actor(authentication),
+                autoAssign
+        );
+    }
+
     @GetMapping("/generate-subscriptions/preview")
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
     public SubscriptionGenerationPreviewResponse previewGenerateSubscriptions(
@@ -117,7 +147,11 @@ public class DeliveryTaskController {
             @Valid @RequestBody CreateDeliveryRunClosureRequest req,
             Authentication authentication
     ) {
-        return deliveryTaskService.recordRunClosure(req, actor(authentication));
+        return deliveryTaskService.recordRunClosure(
+                req,
+                actor(authentication),
+                hasAnyRole(authentication, "ADMIN", "MANAGER")
+        );
     }
 
     @GetMapping("/run-closures")

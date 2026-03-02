@@ -1,7 +1,9 @@
 package net.nani.dairy.sales;
 
 import lombok.RequiredArgsConstructor;
+import net.nani.dairy.auth.AuthUserEntity;
 import net.nani.dairy.auth.AuthUserRepository;
+import net.nani.dairy.auth.UserRole;
 import net.nani.dairy.milk.MilkBatchRepository;
 import net.nani.dairy.milk.QcStatus;
 import net.nani.dairy.milk.Shift;
@@ -9,6 +11,7 @@ import net.nani.dairy.sales.dto.AddDeliveryTaskAddonRequest;
 import net.nani.dairy.sales.dto.CreateDeliveryTaskRequest;
 import net.nani.dairy.sales.dto.CreateDeliveryRunClosureRequest;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
+import net.nani.dairy.sales.dto.DeliveryDayPlanTriggerResponse;
 import net.nani.dairy.sales.dto.DeliveryReconciliationRowResponse;
 import net.nani.dairy.sales.dto.DeliveryRunClosureResponse;
 import net.nani.dairy.sales.dto.DeliveryTaskResponse;
@@ -16,6 +19,10 @@ import net.nani.dairy.sales.dto.SaleResponse;
 import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewItemResponse;
 import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskAssigneeRequest;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkItemRequest;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkItemResponse;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkRequest;
+import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusRequest;
 import net.nani.dairy.tasks.TaskAutomationService;
 import org.springframework.stereotype.Service;
@@ -36,6 +43,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -185,6 +193,34 @@ public class DeliveryTaskService {
         }
 
         return generated;
+    }
+
+    @Transactional
+    public DeliveryDayPlanTriggerResponse triggerDayPlan(LocalDate date, String actorUsername, boolean autoAssign) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        String actor = normalizeActor(actorUsername);
+        int generated = generateSubscriptionTasks(effectiveDate, actor);
+        int autoAssigned = autoAssign ? autoAssignPendingTasks(effectiveDate, actor) : 0;
+
+        List<DeliveryTaskEntity> rows = deliveryTaskRepository.findByTaskDate(effectiveDate);
+        long total = rows.size();
+        long pending = rows.stream()
+                .filter(row -> (row.getStatus() == null ? DeliveryTaskStatus.PENDING : row.getStatus()) == DeliveryTaskStatus.PENDING)
+                .count();
+        long unassignedPending = rows.stream()
+                .filter(row -> (row.getStatus() == null ? DeliveryTaskStatus.PENDING : row.getStatus()) == DeliveryTaskStatus.PENDING)
+                .filter(row -> trimToNull(row.getAssignedToUsername()) == null)
+                .count();
+
+        return DeliveryDayPlanTriggerResponse.builder()
+                .date(effectiveDate)
+                .generatedTasks(generated)
+                .autoAssignedTasks(autoAssigned)
+                .totalTasks(total)
+                .pendingTasks(pending)
+                .unassignedPendingTasks(unassignedPending)
+                .actor(actor)
+                .build();
     }
 
     @Transactional(readOnly = true)
@@ -445,7 +481,8 @@ public class DeliveryTaskService {
     @Transactional
     public DeliveryRunClosureResponse recordRunClosure(
             CreateDeliveryRunClosureRequest req,
-            String actorUsername
+            String actorUsername,
+            boolean privilegedActor
     ) {
         String actor = normalizeActor(actorUsername);
         String routeName = trimToNull(req.getRouteName());
@@ -465,6 +502,13 @@ public class DeliveryTaskService {
         long skippedStops = req.getSkippedStops() == null ? 0L : req.getSkippedStops();
         if (deliveredStops + pendingStops + skippedStops != totalStops) {
             throw new IllegalArgumentException("Stop counts do not match totalStops");
+        }
+        String note = trimToNull(req.getNotes());
+        if (!privilegedActor && pendingStops > 0) {
+            throw new IllegalArgumentException("Run cannot be closed while pending stops exist");
+        }
+        if (privilegedActor && pendingStops > 0 && note == null) {
+            throw new IllegalArgumentException("Add closure note when closing run with pending stops");
         }
 
         double expectedCollection = safeDouble(req.getExpectedCollection());
@@ -489,7 +533,7 @@ public class DeliveryTaskService {
                 .cashCollection(roundTo2(cashCollection))
                 .upiCollection(roundTo2(upiCollection))
                 .otherCollection(roundTo2(otherCollection))
-                .notes(trimToNull(req.getNotes()))
+                .notes(note)
                 .closedBy(actor)
                 .closedAt(OffsetDateTime.now())
                 .build();
@@ -598,6 +642,7 @@ public class DeliveryTaskService {
             if (entity.getDeliveredQtyLiters() <= 0) {
                 throw new IllegalArgumentException("Delivered quantity must be positive");
             }
+            validateMilkDeliveryEligibility(entity, entity.getDeliveredQtyLiters());
             entity.setCompletedAt(OffsetDateTime.now());
             entity.setCompletedBy(normalizedActor);
 
@@ -618,6 +663,75 @@ public class DeliveryTaskService {
         DeliveryTaskEntity saved = deliveryTaskRepository.save(entity);
         taskAutomationService.upsertFromDeliveryTask(saved);
         return toResponse(saved);
+    }
+
+    public UpdateDeliveryTaskStatusBulkResponse bulkUpdateStatus(
+            UpdateDeliveryTaskStatusBulkRequest req,
+            String actorUsername,
+            boolean privilegedActor
+    ) {
+        if (req == null || req.getItems() == null || req.getItems().isEmpty()) {
+            throw new IllegalArgumentException("items are required");
+        }
+
+        List<UpdateDeliveryTaskStatusBulkItemResponse> results = new ArrayList<>();
+        int successCount = 0;
+
+        for (UpdateDeliveryTaskStatusBulkItemRequest item : req.getItems()) {
+            if (item == null || trimToNull(item.getDeliveryTaskId()) == null || item.getStatus() == null) {
+                results.add(
+                        UpdateDeliveryTaskStatusBulkItemResponse.builder()
+                                .deliveryTaskId(item != null ? trimToNull(item.getDeliveryTaskId()) : null)
+                                .success(false)
+                                .errorMessage("deliveryTaskId and status are required")
+                                .task(null)
+                                .build()
+                );
+                continue;
+            }
+
+            try {
+                UpdateDeliveryTaskStatusRequest single = UpdateDeliveryTaskStatusRequest.builder()
+                        .status(item.getStatus())
+                        .deliveredQtyLiters(item.getDeliveredQtyLiters())
+                        .collectedAmount(item.getCollectedAmount())
+                        .notes(item.getNotes())
+                        .build();
+
+                DeliveryTaskResponse updated = updateStatus(
+                        item.getDeliveryTaskId(),
+                        single,
+                        actorUsername,
+                        privilegedActor
+                );
+                successCount += 1;
+                results.add(
+                        UpdateDeliveryTaskStatusBulkItemResponse.builder()
+                                .deliveryTaskId(item.getDeliveryTaskId())
+                                .success(true)
+                                .errorMessage(null)
+                                .task(updated)
+                                .build()
+                );
+            } catch (Exception e) {
+                String message = trimToNull(e.getMessage());
+                results.add(
+                        UpdateDeliveryTaskStatusBulkItemResponse.builder()
+                                .deliveryTaskId(item.getDeliveryTaskId())
+                                .success(false)
+                                .errorMessage(message != null ? message : "Status update failed")
+                                .task(null)
+                                .build()
+                );
+            }
+        }
+
+        return UpdateDeliveryTaskStatusBulkResponse.builder()
+                .totalCount(req.getItems().size())
+                .successCount(successCount)
+                .failedCount(req.getItems().size() - successCount)
+                .items(results)
+                .build();
     }
 
     public List<DeliveryReconciliationRowResponse> reconciliation(LocalDate date, String actorUsername, boolean privilegedActor) {
@@ -712,7 +826,9 @@ public class DeliveryTaskService {
 
         ProductType productType = entity.getProductType() != null ? entity.getProductType() : ProductType.MILK;
         CustomerType customerType = linkedCustomer != null ? linkedCustomer.getCustomerType() : CustomerType.INDIVIDUAL;
-        Shift passShift = productType == ProductType.MILK ? resolvePassShift(entity.getTaskDate()) : null;
+        Shift passShift = productType == ProductType.MILK
+                ? resolvePassShift(entity.getTaskDate(), entity.getTaskShift())
+                : null;
         double quantity = entity.getDeliveredQtyLiters() != null ? entity.getDeliveredQtyLiters() : entity.getPlannedQtyLiters();
         double receivedAmount = collectedAmount == null ? 0.0 : collectedAmount;
 
@@ -736,18 +852,64 @@ public class DeliveryTaskService {
         return saleService.create(saleRequest, actorUsername);
     }
 
-    private Shift resolvePassShift(LocalDate taskDate) {
-        if (milkBatchRepository.findByDateAndShift(taskDate, Shift.AM)
+    private Shift resolvePassShift(LocalDate taskDate, Shift shift) {
+        Shift effectiveShift = shift != null ? shift : Shift.AM;
+        boolean pass = milkBatchRepository.findByDateAndShift(taskDate, effectiveShift)
                 .map(batch -> batch.getQcStatus() == QcStatus.PASS)
-                .orElse(false)) {
-            return Shift.AM;
+                .orElse(false);
+        if (!pass) {
+            throw new IllegalArgumentException(
+                    "No PASS milk batch found for " + taskDate + " " + effectiveShift + ". Complete QC first."
+            );
         }
-        if (milkBatchRepository.findByDateAndShift(taskDate, Shift.PM)
-                .map(batch -> batch.getQcStatus() == QcStatus.PASS)
-                .orElse(false)) {
-            return Shift.PM;
+        return effectiveShift;
+    }
+
+    private void validateMilkDeliveryEligibility(DeliveryTaskEntity entity, double candidateDeliveredQty) {
+        ProductType productType = entity.getProductType() != null ? entity.getProductType() : ProductType.MILK;
+        if (productType != ProductType.MILK) {
+            return;
         }
-        throw new IllegalArgumentException("No PASS milk batch found for task date. Complete QC first.");
+
+        LocalDate taskDate = entity.getTaskDate();
+        if (taskDate == null) {
+            throw new IllegalArgumentException("taskDate is required for milk delivery");
+        }
+        Shift shift = entity.getTaskShift() != null ? entity.getTaskShift() : Shift.AM;
+
+        var batch = milkBatchRepository.findByDateAndShift(taskDate, shift)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "No milk batch found for " + taskDate + " " + shift + ". Save batch and complete QC first."
+                ));
+        if (batch.getQcStatus() != QcStatus.PASS) {
+            throw new IllegalArgumentException(
+                    "Milk QC must be PASS for " + taskDate + " " + shift + ". Current: " + batch.getQcStatus()
+            );
+        }
+
+        double alreadyDeliveredByOthers = deliveryTaskRepository.findByTaskDate(taskDate)
+                .stream()
+                .filter(row -> !Objects.equals(row.getDeliveryTaskId(), entity.getDeliveryTaskId()))
+                .filter(row -> (row.getTaskShift() != null ? row.getTaskShift() : Shift.AM) == shift)
+                .filter(row -> (row.getProductType() != null ? row.getProductType() : ProductType.MILK) == ProductType.MILK)
+                .filter(row -> (row.getStatus() == null ? DeliveryTaskStatus.PENDING : row.getStatus()) == DeliveryTaskStatus.DELIVERED)
+                .mapToDouble(row -> row.getDeliveredQtyLiters() != null ? row.getDeliveredQtyLiters() : row.getPlannedQtyLiters())
+                .sum();
+
+        double availableLiters = batch.getTotalLiters();
+        if (alreadyDeliveredByOthers + candidateDeliveredQty > availableLiters + 1e-6) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            Locale.ROOT,
+                            "Insufficient milk stock for %s %s. Batch %.2f L, already delivered %.2f L, this task %.2f L.",
+                            taskDate,
+                            shift,
+                            availableLiters,
+                            alreadyDeliveredByOthers,
+                            candidateDeliveredQty
+                    )
+            );
+        }
     }
 
     private String buildId() {
@@ -824,6 +986,44 @@ public class DeliveryTaskService {
         DeliveryTaskEntity saved = deliveryTaskRepository.save(created);
         taskAutomationService.upsertFromDeliveryTask(saved);
         return 1;
+    }
+
+    private int autoAssignPendingTasks(LocalDate date, String actorUsername) {
+        List<String> assignableUsers = authUserRepository
+                .findByActiveTrueAndRoleInOrderByUsernameAsc(List.of(UserRole.DELIVERY, UserRole.WORKER, UserRole.MANAGER))
+                .stream()
+                .map(AuthUserEntity::getUsername)
+                .map(this::trimToNull)
+                .filter(Objects::nonNull)
+                .toList();
+        if (assignableUsers.isEmpty()) {
+            return 0;
+        }
+
+        List<DeliveryTaskEntity> unassigned = deliveryTaskRepository.findByTaskDateAndStatus(date, DeliveryTaskStatus.PENDING)
+                .stream()
+                .filter(row -> trimToNull(row.getAssignedToUsername()) == null)
+                .sorted(deliverySort())
+                .toList();
+        if (unassigned.isEmpty()) {
+            return 0;
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        List<DeliveryTaskEntity> updates = new ArrayList<>();
+        int idx = 0;
+        for (DeliveryTaskEntity row : unassigned) {
+            String assignee = assignableUsers.get(idx % assignableUsers.size());
+            idx += 1;
+            row.setAssignedToUsername(assignee);
+            row.setAssignedByUsername(actorUsername);
+            row.setAssignedAt(now);
+            updates.add(row);
+        }
+
+        List<DeliveryTaskEntity> saved = deliveryTaskRepository.saveAll(updates);
+        saved.forEach(taskAutomationService::upsertFromDeliveryTask);
+        return saved.size();
     }
 
     private DeliveryTaskEntity findPendingMergeTarget(

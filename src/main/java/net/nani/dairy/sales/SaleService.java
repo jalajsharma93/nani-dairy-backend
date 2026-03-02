@@ -8,6 +8,8 @@ import net.nani.dairy.milk.MilkBatchRepository;
 import net.nani.dairy.milk.MilkEntryRepository;
 import net.nani.dairy.milk.QcStatus;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionStatementDailyRowResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkItemRequest;
@@ -28,13 +30,20 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDate;
+import java.time.DayOfWeek;
+import java.time.YearMonth;
 import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -48,6 +57,7 @@ public class SaleService {
     private final MedicalTreatmentRepository medicalTreatmentRepository;
     private final AnimalRepository animalRepository;
     private final CustomerRecordRepository customerRecordRepository;
+    private final CustomerSubscriptionLineRepository subscriptionLineRepository;
     private final SaleComplianceOverrideAuditRepository saleComplianceOverrideAuditRepository;
     private final TransactionTemplate transactionTemplate;
 
@@ -301,6 +311,153 @@ public class SaleService {
                         v.totalTransactions
                 ))
                 .toList();
+    }
+
+    public CustomerSubscriptionStatementResponse subscriptionStatement(
+            String customerId,
+            String monthText,
+            boolean includeDaily
+    ) {
+        String normalizedCustomerId = trimToNull(customerId);
+        if (normalizedCustomerId == null) {
+            throw new IllegalArgumentException("customerId is required");
+        }
+
+        YearMonth month;
+        try {
+            month = YearMonth.parse(monthText);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("month must be in YYYY-MM format");
+        }
+
+        LocalDate from = month.atDay(1);
+        LocalDate to = month.atEndOfMonth();
+        CustomerRecordEntity customer = customerRecordRepository.findById(normalizedCustomerId)
+                .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
+
+        List<CustomerSubscriptionLineEntity> lines = customerSubscriptionLinesForStatement(customer.getCustomerId());
+        boolean lineBasedPricing = !lines.isEmpty();
+        String pricingMode = lineBasedPricing ? "LINE_BASED" : "LEGACY_DAILY";
+
+        java.util.Set<LocalDate> skipDates = parseSkipDates(customer.getSubscriptionSkipDatesCsv());
+        LocalDate pausedUntil = customer.getSubscriptionPausedUntil();
+
+        double baselineQty = 0.0;
+        double baselineAmount = 0.0;
+        int baselinePlanDays = 0;
+        double plannedQty = 0.0;
+        double plannedAmount = 0.0;
+        int activePlanDays = 0;
+        int pausedDays = 0;
+        int skipDays = 0;
+
+        List<CustomerSubscriptionStatementDailyRowResponse> dailyRows = includeDaily ? new ArrayList<>() : List.of();
+
+        for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
+            DayPlan baselinePlan = computeDayPlan(customer, lines, date, false, false);
+            DayPlan effectivePlan = computeDayPlan(
+                    customer,
+                    lines,
+                    date,
+                    pausedUntil != null && !date.isAfter(pausedUntil),
+                    skipDates.contains(date)
+            );
+
+            if (baselinePlan.amount > 0) {
+                baselinePlanDays += 1;
+                baselineQty += baselinePlan.qty;
+                baselineAmount += baselinePlan.amount;
+            }
+            if (effectivePlan.amount > 0) {
+                activePlanDays += 1;
+                plannedQty += effectivePlan.qty;
+                plannedAmount += effectivePlan.amount;
+            } else if (baselinePlan.amount > 0 && pausedUntil != null && !date.isAfter(pausedUntil)) {
+                pausedDays += 1;
+            } else if (baselinePlan.amount > 0 && skipDates.contains(date)) {
+                skipDays += 1;
+            }
+
+            if (includeDaily) {
+                String status;
+                if (effectivePlan.paused) {
+                    status = "PAUSED";
+                } else if (effectivePlan.skipped) {
+                    status = "HOLIDAY_SKIP";
+                } else if (effectivePlan.amount > 0) {
+                    status = "PLANNED";
+                } else {
+                    status = "NO_PLAN";
+                }
+                dailyRows.add(
+                        CustomerSubscriptionStatementDailyRowResponse.builder()
+                                .date(date)
+                                .dayOfWeek(date.getDayOfWeek().name())
+                                .status(status)
+                                .expectedQty(roundTo2(effectivePlan.qty))
+                                .expectedAmount(roundTo2(effectivePlan.amount))
+                                .build()
+                );
+            }
+        }
+
+        List<SaleEntity> billedRows = saleRepository.findByDispatchDateBetweenAndCustomerId(from, to, customer.getCustomerId());
+        if (billedRows.isEmpty()) {
+            billedRows = saleRepository.findByDispatchDateBetweenAndCustomerTypeAndCustomerNameIgnoreCase(
+                    from,
+                    to,
+                    customer.getCustomerType(),
+                    customer.getCustomerName()
+            );
+        }
+
+        double billedQty = 0.0;
+        double billedAmount = 0.0;
+        double receivedAmount = 0.0;
+        double pendingAmount = 0.0;
+        LinkedHashSet<LocalDate> billedDates = new LinkedHashSet<>();
+        for (SaleEntity row : billedRows) {
+            billedQty += row.getQuantity();
+            billedAmount += row.getTotalAmount();
+            receivedAmount += row.getReceivedAmount();
+            pendingAmount += row.getPendingAmount();
+            billedDates.add(row.getDispatchDate());
+        }
+
+        int cycleDays = month.lengthOfMonth();
+        double prorationFactor = cycleDays == 0 ? 0.0 : ((double) activePlanDays / (double) cycleDays);
+        double holidayCredit = Math.max(0, baselineAmount - plannedAmount);
+        double variance = billedAmount - plannedAmount;
+
+        return CustomerSubscriptionStatementResponse.builder()
+                .customerId(customer.getCustomerId())
+                .customerName(customer.getCustomerName())
+                .month(month.toString())
+                .dateFrom(from)
+                .dateTo(to)
+                .subscriptionActive(customer.isSubscriptionActive())
+                .pricingMode(pricingMode)
+                .cycleDays(cycleDays)
+                .baselinePlanDays(baselinePlanDays)
+                .activePlanDays(activePlanDays)
+                .pausedDays(pausedDays)
+                .skipDays(skipDays)
+                .billedDays(billedDates.size())
+                .prorationFactor(roundTo4(prorationFactor))
+                .baselinePlanQty(roundTo2(baselineQty))
+                .baselinePlanAmount(roundTo2(baselineAmount))
+                .plannedQty(roundTo2(plannedQty))
+                .plannedAmount(roundTo2(plannedAmount))
+                .holidayCreditAmount(roundTo2(holidayCredit))
+                .billedQty(roundTo2(billedQty))
+                .billedAmount(roundTo2(billedAmount))
+                .receivedAmount(roundTo2(receivedAmount))
+                .pendingAmount(roundTo2(pendingAmount))
+                .expectedVsBilledVariance(roundTo2(variance))
+                .currentRunningBalance(roundTo2(safeDouble(customer.getRunningBalance())))
+                .totalPaidToDate(roundTo2(safeDouble(customer.getTotalPaid())))
+                .dailyRows(dailyRows)
+                .build();
     }
 
     public List<SaleComplianceOverrideAuditResponse> overrideAudits(LocalDate from, LocalDate to) {
@@ -764,6 +921,131 @@ public class SaleService {
                 )
                 .map(this::toDeliveryChecklistItemResponse)
                 .toList();
+    }
+
+    private List<CustomerSubscriptionLineEntity> customerSubscriptionLinesForStatement(String customerId) {
+        String normalizedCustomerId = trimToNull(customerId);
+        if (normalizedCustomerId == null) {
+            return List.of();
+        }
+        return subscriptionLineRepository.findByCustomerIdAndActiveTrueOrderByTaskShiftAscPreferredTimeAscCreatedAtAsc(
+                normalizedCustomerId
+        );
+    }
+
+    private DayPlan computeDayPlan(
+            CustomerRecordEntity customer,
+            List<CustomerSubscriptionLineEntity> lines,
+            LocalDate date,
+            boolean paused,
+            boolean skipped
+    ) {
+        if (customer == null || !customer.isActive() || !customer.isSubscriptionActive()) {
+            return new DayPlan(0.0, 0.0, false, false);
+        }
+        if (paused || skipped) {
+            return new DayPlan(0.0, 0.0, paused, skipped);
+        }
+
+        if (lines != null && !lines.isEmpty()) {
+            double qty = 0.0;
+            double amount = 0.0;
+            for (CustomerSubscriptionLineEntity line : lines) {
+                if (line == null || !line.isActive()) {
+                    continue;
+                }
+                if (line.getStartDate() != null && date.isBefore(line.getStartDate())) {
+                    continue;
+                }
+                if (line.getEndDate() != null && date.isAfter(line.getEndDate())) {
+                    continue;
+                }
+
+                EnumSet<DayOfWeek> lineDays = parseActiveDays(line.getActiveDaysCsv());
+                if (!lineDays.isEmpty() && !lineDays.contains(date.getDayOfWeek())) {
+                    continue;
+                }
+
+                double lineQty = line.getQuantity();
+                double lineUnitPrice = line.getUnitPrice() > 0
+                        ? line.getUnitPrice()
+                        : safeDouble(customer.getDefaultMilkUnitPrice());
+                if (lineQty <= 0 || lineUnitPrice <= 0) {
+                    continue;
+                }
+                qty += lineQty;
+                amount += (lineQty * lineUnitPrice);
+            }
+            return new DayPlan(qty, amount, false, false);
+        }
+
+        double legacyQty = safeDouble(customer.getDailySubscriptionQty());
+        double legacyUnitPrice = safeDouble(customer.getDefaultMilkUnitPrice());
+        if (legacyQty <= 0 || legacyUnitPrice <= 0) {
+            return new DayPlan(0.0, 0.0, false, false);
+        }
+        return new DayPlan(legacyQty, legacyQty * legacyUnitPrice, false, false);
+    }
+
+    private Set<LocalDate> parseSkipDates(String csv) {
+        Set<LocalDate> dates = new HashSet<>();
+        String raw = trimToNull(csv);
+        if (raw == null) {
+            return dates;
+        }
+        String[] tokens = raw.split("[,\\s]+");
+        for (String token : tokens) {
+            String normalized = trimToNull(token);
+            if (normalized == null) {
+                continue;
+            }
+            try {
+                dates.add(LocalDate.parse(normalized));
+            } catch (DateTimeParseException ignore) {
+                // Ignore malformed dates in stored CSV.
+            }
+        }
+        return dates;
+    }
+
+    private EnumSet<DayOfWeek> parseActiveDays(String csv) {
+        EnumSet<DayOfWeek> days = EnumSet.noneOf(DayOfWeek.class);
+        String raw = trimToNull(csv);
+        if (raw == null) {
+            return days;
+        }
+        String[] tokens = raw.split("[,\\s]+");
+        for (String token : tokens) {
+            DayOfWeek day = parseDay(token);
+            if (day != null) {
+                days.add(day);
+            }
+        }
+        return days;
+    }
+
+    private DayOfWeek parseDay(String token) {
+        String normalized = trimToNull(token);
+        if (normalized == null) return null;
+        normalized = normalized.toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "MON", "MONDAY" -> DayOfWeek.MONDAY;
+            case "TUE", "TUESDAY" -> DayOfWeek.TUESDAY;
+            case "WED", "WEDNESDAY" -> DayOfWeek.WEDNESDAY;
+            case "THU", "THURSDAY" -> DayOfWeek.THURSDAY;
+            case "FRI", "FRIDAY" -> DayOfWeek.FRIDAY;
+            case "SAT", "SATURDAY" -> DayOfWeek.SATURDAY;
+            case "SUN", "SUNDAY" -> DayOfWeek.SUNDAY;
+            default -> null;
+        };
+    }
+
+    private double roundTo2(double value) {
+        return Math.round(value * 100.0d) / 100.0d;
+    }
+
+    private double roundTo4(double value) {
+        return Math.round(value * 10000.0d) / 10000.0d;
     }
 
     @Transactional
@@ -1253,6 +1535,9 @@ public class SaleService {
 
     private String sortable(String value) {
         return value == null ? "" : value.trim().toLowerCase();
+    }
+
+    private record DayPlan(double qty, double amount, boolean paused, boolean skipped) {
     }
 
     private record PaymentValues(double totalAmount, double receivedAmount, double pendingAmount, PaymentStatus paymentStatus) {

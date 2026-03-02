@@ -12,3 +12,5 @@ app:
   auth:
     jwt-secret: "nani-dairy-test-secret-change-before-production-123456"
     jwt-exp-hours: 24
+  delivery:
+    day-planner-enabled: false

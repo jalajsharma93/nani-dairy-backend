@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
+import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkRequest;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkResponse;
@@ -22,6 +23,7 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.List;
 
 @RestController
@@ -71,6 +73,17 @@ public class SaleController {
         LocalDate to = dateTo != null ? dateTo : LocalDate.now();
         LocalDate from = dateFrom != null ? dateFrom : to;
         return saleService.ledger(from, to);
+    }
+
+    @GetMapping("/subscription-statement")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public CustomerSubscriptionStatementResponse subscriptionStatement(
+            @RequestParam String customerId,
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false, defaultValue = "false") boolean includeDaily
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        return saleService.subscriptionStatement(customerId, effectiveMonth, includeDaily);
     }
 
     @GetMapping("/override-audits")
