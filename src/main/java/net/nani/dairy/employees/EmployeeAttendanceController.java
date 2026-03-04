@@ -62,6 +62,7 @@ public class EmployeeAttendanceController {
     public EmployeeAttendanceMonthlyReportResponse monthlyReport(
             @RequestParam(required = false) String month,
             @RequestParam(required = false) Boolean includeInactive,
+            @RequestParam(required = false) Boolean includeAdjustments,
             @RequestParam(required = false) SalaryComputationMode salaryMode,
             @RequestParam(required = false) Double fullTimeDailyRate,
             @RequestParam(required = false) Double partTimeDailyRate,
@@ -74,6 +75,7 @@ public class EmployeeAttendanceController {
         return attendanceService.monthlyReport(
                 month,
                 includeInactive,
+                includeAdjustments,
                 salaryMode,
                 fullTimeDailyRate,
                 partTimeDailyRate,
@@ -90,6 +92,7 @@ public class EmployeeAttendanceController {
     public ResponseEntity<String> monthlyReportExport(
             @RequestParam(required = false) String month,
             @RequestParam(required = false) Boolean includeInactive,
+            @RequestParam(required = false) Boolean includeAdjustments,
             @RequestParam(required = false) SalaryComputationMode salaryMode,
             @RequestParam(required = false) Double fullTimeDailyRate,
             @RequestParam(required = false) Double partTimeDailyRate,
@@ -103,6 +106,7 @@ public class EmployeeAttendanceController {
         String csv = attendanceService.monthlyReportCsv(
                 month,
                 includeInactive,
+                includeAdjustments,
                 salaryMode,
                 fullTimeDailyRate,
                 partTimeDailyRate,

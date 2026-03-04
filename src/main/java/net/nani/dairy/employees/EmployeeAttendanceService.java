@@ -20,6 +20,7 @@ public class EmployeeAttendanceService {
 
     private final EmployeeAttendanceRepository attendanceRepository;
     private final EmployeeRepository employeeRepository;
+    private final EmployeeCompensationAdjustmentRepository compensationAdjustmentRepository;
 
     public List<EmployeeAttendanceResponse> list(
             LocalDate date,
@@ -101,6 +102,7 @@ public class EmployeeAttendanceService {
     public EmployeeAttendanceMonthlyReportResponse monthlyReport(
             String month,
             Boolean includeInactive,
+            Boolean includeAdjustments,
             SalaryComputationMode salaryMode,
             Double fullTimeDailyRate,
             Double partTimeDailyRate,
@@ -115,6 +117,7 @@ public class EmployeeAttendanceService {
         LocalDate dateTo = yearMonth.atEndOfMonth();
 
         boolean effectiveIncludeInactive = Boolean.TRUE.equals(includeInactive);
+        boolean effectiveIncludeAdjustments = includeAdjustments == null || includeAdjustments;
         SalaryComputationMode mode = salaryMode != null ? salaryMode : SalaryComputationMode.NONE;
         SalaryInputs salaryInputs = buildSalaryInputs(
                 fullTimeDailyRate,
@@ -155,6 +158,24 @@ public class EmployeeAttendanceService {
             accumulator.accept(row);
         }
 
+        Map<String, AdjustmentAccumulator> adjustmentByEmployeeId = new HashMap<>();
+        if (effectiveIncludeAdjustments) {
+            List<EmployeeCompensationAdjustmentEntity> adjustments = compensationAdjustmentRepository
+                    .findByAdjustmentMonthOrderByAdjustmentDateAscEmployeeIdAsc(yearMonth.toString());
+            for (EmployeeCompensationAdjustmentEntity row : adjustments) {
+                String employeeId = row.getEmployeeId();
+                if (employeeId == null || employeeId.isBlank()) {
+                    continue;
+                }
+                if (!employeeById.containsKey(employeeId)) {
+                    continue;
+                }
+                AdjustmentAccumulator accumulator = adjustmentByEmployeeId
+                        .computeIfAbsent(employeeId, ignored -> new AdjustmentAccumulator());
+                accumulator.accept(row);
+            }
+        }
+
         List<EmployeeAttendanceMonthlyRowResponse> reportRows = new ArrayList<>(employees.size());
         int totalPresentDays = 0;
         int totalAbsentDays = 0;
@@ -163,6 +184,12 @@ public class EmployeeAttendanceService {
         double totalHoursWorked = 0d;
         double totalOvertimeHours = 0d;
         double totalSuggestedSalary = 0d;
+        double totalBonusAmount = 0d;
+        double totalProductionIncentiveAmount = 0d;
+        double totalAdvanceAmount = 0d;
+        double totalDeductionAmount = 0d;
+        double totalGrossSalary = 0d;
+        double totalNetPayableSalary = 0d;
 
         for (EmployeeEntity employee : employees) {
             AttendanceAccumulator accumulator = accumulatorByEmployeeId.get(employee.getEmployeeId());
@@ -189,6 +216,16 @@ public class EmployeeAttendanceService {
                     overtimeHours,
                     salaryInputs
             ));
+            AdjustmentAccumulator adjustmentAccumulator = adjustmentByEmployeeId.get(employee.getEmployeeId());
+            if (adjustmentAccumulator == null) {
+                adjustmentAccumulator = new AdjustmentAccumulator();
+            }
+            double bonusAmount = round2(adjustmentAccumulator.bonusAmount);
+            double productionIncentiveAmount = round2(adjustmentAccumulator.productionIncentiveAmount);
+            double advanceAmount = round2(adjustmentAccumulator.advanceAmount);
+            double deductionAmount = round2(adjustmentAccumulator.deductionAmount);
+            double grossSalary = round2(suggestedSalary + bonusAmount + productionIncentiveAmount);
+            double netPayableSalary = round2(grossSalary - advanceAmount - deductionAmount);
 
             reportRows.add(EmployeeAttendanceMonthlyRowResponse.builder()
                     .employeeId(employee.getEmployeeId())
@@ -205,6 +242,12 @@ public class EmployeeAttendanceService {
                     .avgHoursPerPresentDay(avgHours)
                     .overtimeHours(overtimeHours)
                     .suggestedSalary(suggestedSalary)
+                    .bonusAmount(bonusAmount)
+                    .productionIncentiveAmount(productionIncentiveAmount)
+                    .advanceAmount(advanceAmount)
+                    .deductionAmount(deductionAmount)
+                    .grossSalary(grossSalary)
+                    .netPayableSalary(netPayableSalary)
                     .build());
 
             totalPresentDays += presentDays;
@@ -214,6 +257,12 @@ public class EmployeeAttendanceService {
             totalHoursWorked += totalHours;
             totalOvertimeHours += overtimeHours;
             totalSuggestedSalary += suggestedSalary;
+            totalBonusAmount += bonusAmount;
+            totalProductionIncentiveAmount += productionIncentiveAmount;
+            totalAdvanceAmount += advanceAmount;
+            totalDeductionAmount += deductionAmount;
+            totalGrossSalary += grossSalary;
+            totalNetPayableSalary += netPayableSalary;
         }
 
         return EmployeeAttendanceMonthlyReportResponse.builder()
@@ -221,6 +270,7 @@ public class EmployeeAttendanceService {
                 .dateFrom(dateFrom)
                 .dateTo(dateTo)
                 .includeInactive(effectiveIncludeInactive)
+                .includeAdjustments(effectiveIncludeAdjustments)
                 .salaryMode(mode)
                 .fullTimeDailyRate(salaryInputs.fullTimeDailyRate)
                 .partTimeDailyRate(salaryInputs.partTimeDailyRate)
@@ -237,6 +287,12 @@ public class EmployeeAttendanceService {
                 .totalHoursWorked(round2(totalHoursWorked))
                 .totalOvertimeHours(round2(totalOvertimeHours))
                 .totalSuggestedSalary(round2(totalSuggestedSalary))
+                .totalBonusAmount(round2(totalBonusAmount))
+                .totalProductionIncentiveAmount(round2(totalProductionIncentiveAmount))
+                .totalAdvanceAmount(round2(totalAdvanceAmount))
+                .totalDeductionAmount(round2(totalDeductionAmount))
+                .totalGrossSalary(round2(totalGrossSalary))
+                .totalNetPayableSalary(round2(totalNetPayableSalary))
                 .rows(reportRows)
                 .build();
     }
@@ -244,6 +300,7 @@ public class EmployeeAttendanceService {
     public String monthlyReportCsv(
             String month,
             Boolean includeInactive,
+            Boolean includeAdjustments,
             SalaryComputationMode salaryMode,
             Double fullTimeDailyRate,
             Double partTimeDailyRate,
@@ -256,6 +313,7 @@ public class EmployeeAttendanceService {
         EmployeeAttendanceMonthlyReportResponse report = monthlyReport(
                 month,
                 includeInactive,
+                includeAdjustments,
                 salaryMode,
                 fullTimeDailyRate,
                 partTimeDailyRate,
@@ -267,7 +325,7 @@ public class EmployeeAttendanceService {
         );
 
         StringBuilder csv = new StringBuilder();
-        csv.append("month,dateFrom,dateTo,salaryMode,employeeId,employeeName,employeeType,active,workingDaysInMonth,presentDays,absentDays,presentShifts,absentShifts,shiftsMarked,totalHoursWorked,avgHoursPerPresentDay,overtimeHours,suggestedSalary\n");
+        csv.append("month,dateFrom,dateTo,salaryMode,employeeId,employeeName,employeeType,active,workingDaysInMonth,presentDays,absentDays,presentShifts,absentShifts,shiftsMarked,totalHoursWorked,avgHoursPerPresentDay,overtimeHours,suggestedSalary,bonusAmount,productionIncentiveAmount,advanceAmount,deductionAmount,grossSalary,netPayableSalary\n");
 
         for (EmployeeAttendanceMonthlyRowResponse row : report.getRows()) {
             appendCsvValue(csv, report.getMonth());
@@ -288,11 +346,17 @@ public class EmployeeAttendanceService {
             appendCsvValue(csv, String.valueOf(row.getAvgHoursPerPresentDay()));
             appendCsvValue(csv, String.valueOf(row.getOvertimeHours()));
             appendCsvValue(csv, String.valueOf(row.getSuggestedSalary()));
+            appendCsvValue(csv, String.valueOf(row.getBonusAmount()));
+            appendCsvValue(csv, String.valueOf(row.getProductionIncentiveAmount()));
+            appendCsvValue(csv, String.valueOf(row.getAdvanceAmount()));
+            appendCsvValue(csv, String.valueOf(row.getDeductionAmount()));
+            appendCsvValue(csv, String.valueOf(row.getGrossSalary()));
+            appendCsvValue(csv, String.valueOf(row.getNetPayableSalary()));
             csv.append('\n');
         }
 
         csv.append('\n');
-        csv.append("summary,totalEmployees,totalPresentDays,totalAbsentDays,totalPresentShifts,totalAbsentShifts,totalHoursWorked,totalOvertimeHours,totalSuggestedSalary\n");
+        csv.append("summary,totalEmployees,totalPresentDays,totalAbsentDays,totalPresentShifts,totalAbsentShifts,totalHoursWorked,totalOvertimeHours,totalSuggestedSalary,totalBonusAmount,totalProductionIncentiveAmount,totalAdvanceAmount,totalDeductionAmount,totalGrossSalary,totalNetPayableSalary\n");
         appendCsvValue(csv, "summary");
         appendCsvValue(csv, String.valueOf(report.getTotalEmployees()));
         appendCsvValue(csv, String.valueOf(report.getTotalPresentDays()));
@@ -302,6 +366,12 @@ public class EmployeeAttendanceService {
         appendCsvValue(csv, String.valueOf(report.getTotalHoursWorked()));
         appendCsvValue(csv, String.valueOf(report.getTotalOvertimeHours()));
         appendCsvValue(csv, String.valueOf(report.getTotalSuggestedSalary()));
+        appendCsvValue(csv, String.valueOf(report.getTotalBonusAmount()));
+        appendCsvValue(csv, String.valueOf(report.getTotalProductionIncentiveAmount()));
+        appendCsvValue(csv, String.valueOf(report.getTotalAdvanceAmount()));
+        appendCsvValue(csv, String.valueOf(report.getTotalDeductionAmount()));
+        appendCsvValue(csv, String.valueOf(report.getTotalGrossSalary()));
+        appendCsvValue(csv, String.valueOf(report.getTotalNetPayableSalary()));
         csv.append('\n');
 
         return csv.toString();
@@ -513,6 +583,26 @@ public class EmployeeAttendanceService {
                 }
             }
             return count;
+        }
+    }
+
+    private static class AdjustmentAccumulator {
+        private double bonusAmount = 0d;
+        private double productionIncentiveAmount = 0d;
+        private double advanceAmount = 0d;
+        private double deductionAmount = 0d;
+
+        private void accept(EmployeeCompensationAdjustmentEntity row) {
+            double amount = row.getAmount();
+            if (!Double.isFinite(amount) || amount <= 0) {
+                return;
+            }
+            switch (row.getAdjustmentType()) {
+                case BONUS -> bonusAmount += amount;
+                case PRODUCTION_INCENTIVE -> productionIncentiveAmount += amount;
+                case ADVANCE -> advanceAmount += amount;
+                case DEDUCTION -> deductionAmount += amount;
+            }
         }
     }
 

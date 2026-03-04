@@ -16,6 +16,7 @@ public class EmployeeAttendanceMonthlyReportResponse {
     private LocalDate dateFrom;
     private LocalDate dateTo;
     private boolean includeInactive;
+    private boolean includeAdjustments;
     private SalaryComputationMode salaryMode;
     private double fullTimeDailyRate;
     private double partTimeDailyRate;
@@ -32,5 +33,11 @@ public class EmployeeAttendanceMonthlyReportResponse {
     private double totalHoursWorked;
     private double totalOvertimeHours;
     private double totalSuggestedSalary;
+    private double totalBonusAmount;
+    private double totalProductionIncentiveAmount;
+    private double totalAdvanceAmount;
+    private double totalDeductionAmount;
+    private double totalGrossSalary;
+    private double totalNetPayableSalary;
     private List<EmployeeAttendanceMonthlyRowResponse> rows;
 }

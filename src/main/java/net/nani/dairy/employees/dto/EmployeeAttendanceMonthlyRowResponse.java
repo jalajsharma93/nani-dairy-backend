@@ -23,4 +23,10 @@ public class EmployeeAttendanceMonthlyRowResponse {
     private double avgHoursPerPresentDay;
     private double overtimeHours;
     private double suggestedSalary;
+    private double bonusAmount;
+    private double productionIncentiveAmount;
+    private double advanceAmount;
+    private double deductionAmount;
+    private double grossSalary;
+    private double netPayableSalary;
 }
