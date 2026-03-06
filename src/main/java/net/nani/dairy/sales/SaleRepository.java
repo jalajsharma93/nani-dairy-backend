@@ -9,9 +9,23 @@ public interface SaleRepository extends JpaRepository<SaleEntity, String> {
     List<SaleEntity> findByDispatchDate(LocalDate dispatchDate);
     List<SaleEntity> findByDispatchDateBetween(LocalDate dispatchDateStart, LocalDate dispatchDateEnd);
     List<SaleEntity> findByDispatchDateBetweenAndCustomerId(LocalDate dispatchDateStart, LocalDate dispatchDateEnd, String customerId);
+    List<SaleEntity> findByCustomerId(String customerId);
+    List<SaleEntity> findByDispatchDateBeforeAndCustomerId(LocalDate dispatchDate, String customerId);
+    List<SaleEntity> findByDispatchDateLessThanEqualAndCustomerId(LocalDate dispatchDate, String customerId);
     List<SaleEntity> findByDispatchDateBetweenAndCustomerTypeAndCustomerNameIgnoreCase(
             LocalDate dispatchDateStart,
             LocalDate dispatchDateEnd,
+            CustomerType customerType,
+            String customerName
+    );
+    List<SaleEntity> findByCustomerTypeAndCustomerNameIgnoreCase(CustomerType customerType, String customerName);
+    List<SaleEntity> findByDispatchDateBeforeAndCustomerTypeAndCustomerNameIgnoreCase(
+            LocalDate dispatchDate,
+            CustomerType customerType,
+            String customerName
+    );
+    List<SaleEntity> findByDispatchDateLessThanEqualAndCustomerTypeAndCustomerNameIgnoreCase(
+            LocalDate dispatchDate,
             CustomerType customerType,
             String customerName
     );

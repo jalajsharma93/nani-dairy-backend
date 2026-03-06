@@ -9,6 +9,9 @@ import net.nani.dairy.milk.MilkEntryRepository;
 import net.nani.dairy.milk.QcStatus;
 import net.nani.dairy.milk.Shift;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceLineItemResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceSummaryResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementDailyRowResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
@@ -324,12 +327,7 @@ public class SaleService {
             throw new IllegalArgumentException("customerId is required");
         }
 
-        YearMonth month;
-        try {
-            month = YearMonth.parse(monthText);
-        } catch (Exception e) {
-            throw new IllegalArgumentException("month must be in YYYY-MM format");
-        }
+        YearMonth month = parseYearMonth(monthText);
 
         LocalDate from = month.atDay(1);
         LocalDate to = month.atEndOfMonth();
@@ -459,6 +457,94 @@ public class SaleService {
                 .totalPaidToDate(roundTo2(safeDouble(customer.getTotalPaid())))
                 .dailyRows(dailyRows)
                 .build();
+    }
+
+    public CustomerSubscriptionInvoiceResponse subscriptionInvoice(
+            String customerId,
+            String monthText,
+            boolean includeDaily
+    ) {
+        String normalizedCustomerId = trimToNull(customerId);
+        if (normalizedCustomerId == null) {
+            throw new IllegalArgumentException("customerId is required");
+        }
+
+        YearMonth month = parseYearMonth(monthText);
+        CustomerRecordEntity customer = customerRecordRepository.findById(normalizedCustomerId)
+                .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
+
+        CustomerSubscriptionStatementResponse statement = subscriptionStatement(
+                normalizedCustomerId,
+                month.toString(),
+                includeDaily
+        );
+
+        LocalDate from = month.atDay(1);
+        LocalDate to = month.atEndOfMonth();
+        double openingPendingAmount = roundTo2(sumPending(findSalesBeforeDateForCustomer(customer, from)));
+        double closingPendingAmount = roundTo2(sumPending(findSalesUpToDateForCustomer(customer, to)));
+        double addOnBilledAmount = roundTo2(Math.max(0, statement.getBilledAmount() - statement.getPlannedAmount()));
+        double underDeliveryCreditAmount = roundTo2(Math.max(0, statement.getPlannedAmount() - statement.getBilledAmount()));
+        LocalDate issueDate = to;
+        LocalDate dueDate = to.plusDays(3);
+
+        return CustomerSubscriptionInvoiceResponse.builder()
+                .customerId(customer.getCustomerId())
+                .customerName(customer.getCustomerName())
+                .customerType(customer.getCustomerType())
+                .routeName(customer.getRouteName())
+                .collectionPoint(customer.getCollectionPoint())
+                .month(month.toString())
+                .dateFrom(from)
+                .dateTo(to)
+                .invoiceNumber(buildInvoiceNumber(customer, month))
+                .issueDate(issueDate)
+                .dueDate(dueDate)
+                .subscriptionActive(statement.isSubscriptionActive())
+                .pricingMode(statement.getPricingMode())
+                .prorationFactor(statement.getProrationFactor())
+                .cycleDays(statement.getCycleDays())
+                .activePlanDays(statement.getActivePlanDays())
+                .pausedDays(statement.getPausedDays())
+                .skipDays(statement.getSkipDays())
+                .billedDays(statement.getBilledDays())
+                .plannedQty(statement.getPlannedQty())
+                .plannedAmount(statement.getPlannedAmount())
+                .holidayCreditAmount(statement.getHolidayCreditAmount())
+                .billedQty(statement.getBilledQty())
+                .billedAmount(statement.getBilledAmount())
+                .receivedAmount(statement.getReceivedAmount())
+                .pendingAmount(statement.getPendingAmount())
+                .addOnBilledAmount(addOnBilledAmount)
+                .underDeliveryCreditAmount(underDeliveryCreditAmount)
+                .openingPendingAmount(openingPendingAmount)
+                .closingPendingAmount(closingPendingAmount)
+                .currentRunningBalance(roundTo2(safeDouble(customer.getRunningBalance())))
+                .invoiceLineItems(buildInvoiceLineItems(
+                        statement,
+                        openingPendingAmount,
+                        closingPendingAmount,
+                        addOnBilledAmount,
+                        underDeliveryCreditAmount
+                ))
+                .dailyRows(statement.getDailyRows())
+                .build();
+    }
+
+    public List<CustomerSubscriptionInvoiceSummaryResponse> subscriptionInvoices(
+            String monthText,
+            CustomerType customerType
+    ) {
+        YearMonth month = parseYearMonth(monthText);
+        List<CustomerRecordEntity> customers = customerRecordRepository.findByIsActiveAndSubscriptionActive(true, true);
+        return customers.stream()
+                .filter(customer -> customerType == null || customer.getCustomerType() == customerType)
+                .sorted(
+                        Comparator.comparing((CustomerRecordEntity c) -> sortable(c.getRouteName()))
+                                .thenComparing(c -> sortable(c.getCustomerName()))
+                )
+                .map(customer -> toSubscriptionInvoiceSummary(subscriptionInvoice(customer.getCustomerId(), month.toString(), false)))
+                .toList();
     }
 
     public List<SaleComplianceOverrideAuditResponse> overrideAudits(LocalDate from, LocalDate to) {
@@ -1039,6 +1125,183 @@ public class SaleService {
             case "SUN", "SUNDAY" -> DayOfWeek.SUNDAY;
             default -> null;
         };
+    }
+
+    private YearMonth parseYearMonth(String monthText) {
+        String normalizedMonth = trimToNull(monthText);
+        if (normalizedMonth == null) {
+            throw new IllegalArgumentException("month is required in YYYY-MM format");
+        }
+        try {
+            return YearMonth.parse(normalizedMonth);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("month must be in YYYY-MM format");
+        }
+    }
+
+    private String buildInvoiceNumber(CustomerRecordEntity customer, YearMonth month) {
+        String suffixBase = trimToNull(customer.getCustomerId()) != null
+                ? customer.getCustomerId()
+                : customer.getCustomerName();
+        String compact = trimToNull(suffixBase) == null
+                ? "CUST"
+                : suffixBase.replaceAll("[^A-Za-z0-9]", "").toUpperCase(Locale.ROOT);
+        String suffix = compact.length() <= 6 ? compact : compact.substring(compact.length() - 6);
+        return "INV-" + month.toString().replace("-", "") + "-" + suffix;
+    }
+
+    private List<SaleEntity> findSalesBeforeDateForCustomer(CustomerRecordEntity customer, LocalDate beforeDate) {
+        if (customer == null) {
+            return List.of();
+        }
+        String customerId = trimToNull(customer.getCustomerId());
+        if (customerId != null) {
+            List<SaleEntity> byId = saleRepository.findByDispatchDateBeforeAndCustomerId(beforeDate, customerId);
+            if (!byId.isEmpty()) {
+                return byId;
+            }
+        }
+        if (customer.getCustomerType() == null || trimToNull(customer.getCustomerName()) == null) {
+            return List.of();
+        }
+        return saleRepository.findByDispatchDateBeforeAndCustomerTypeAndCustomerNameIgnoreCase(
+                beforeDate,
+                customer.getCustomerType(),
+                customer.getCustomerName()
+        );
+    }
+
+    private List<SaleEntity> findSalesUpToDateForCustomer(CustomerRecordEntity customer, LocalDate toDateInclusive) {
+        if (customer == null) {
+            return List.of();
+        }
+        String customerId = trimToNull(customer.getCustomerId());
+        if (customerId != null) {
+            List<SaleEntity> byId = saleRepository.findByDispatchDateLessThanEqualAndCustomerId(toDateInclusive, customerId);
+            if (!byId.isEmpty()) {
+                return byId;
+            }
+        }
+        if (customer.getCustomerType() == null || trimToNull(customer.getCustomerName()) == null) {
+            return List.of();
+        }
+        return saleRepository.findByDispatchDateLessThanEqualAndCustomerTypeAndCustomerNameIgnoreCase(
+                toDateInclusive,
+                customer.getCustomerType(),
+                customer.getCustomerName()
+        );
+    }
+
+    private double sumPending(List<SaleEntity> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return 0.0;
+        }
+        double total = 0.0;
+        for (SaleEntity row : rows) {
+            if (row == null) {
+                continue;
+            }
+            total += safeDouble(row.getPendingAmount());
+        }
+        return total;
+    }
+
+    private List<CustomerSubscriptionInvoiceLineItemResponse> buildInvoiceLineItems(
+            CustomerSubscriptionStatementResponse statement,
+            double openingPendingAmount,
+            double closingPendingAmount,
+            double addOnBilledAmount,
+            double underDeliveryCreditAmount
+    ) {
+        List<CustomerSubscriptionInvoiceLineItemResponse> items = new ArrayList<>();
+        items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                .code("OPENING_PENDING")
+                .label("Opening pending balance")
+                .quantity(0.0)
+                .unitPrice(0.0)
+                .amount(roundTo2(openingPendingAmount))
+                .note("Pending carried from previous cycles.")
+                .build());
+        items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                .code("PLANNED_SUBSCRIPTION")
+                .label("Planned subscription charge")
+                .quantity(roundTo2(statement.getPlannedQty()))
+                .unitPrice(0.0)
+                .amount(roundTo2(statement.getPlannedAmount()))
+                .note("Month plan after pause/skip and proration.")
+                .build());
+        if (statement.getHolidayCreditAmount() > 0) {
+            items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                    .code("HOLIDAY_CREDIT")
+                    .label("Holiday/skip credit")
+                    .quantity(0.0)
+                    .unitPrice(0.0)
+                    .amount(roundTo2(-statement.getHolidayCreditAmount()))
+                    .note("Credit for configured skip/holiday days.")
+                    .build());
+        }
+        if (addOnBilledAmount > 0) {
+            items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                    .code("ADD_ON_BILLED")
+                    .label("Extra billed above plan")
+                    .quantity(0.0)
+                    .unitPrice(0.0)
+                    .amount(roundTo2(addOnBilledAmount))
+                    .note("Extra quantity or non-plan deliveries billed in month.")
+                    .build());
+        }
+        if (underDeliveryCreditAmount > 0) {
+            items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                    .code("UNDER_DELIVERY_CREDIT")
+                    .label("Under-delivery adjustment")
+                    .quantity(0.0)
+                    .unitPrice(0.0)
+                    .amount(roundTo2(-underDeliveryCreditAmount))
+                    .note("Delivered below planned amount in month.")
+                    .build());
+        }
+        items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                .code("PAYMENT_RECEIVED")
+                .label("Payments received")
+                .quantity(0.0)
+                .unitPrice(0.0)
+                .amount(roundTo2(-statement.getReceivedAmount()))
+                .note("Collection received during the month.")
+                .build());
+        items.add(CustomerSubscriptionInvoiceLineItemResponse.builder()
+                .code("CLOSING_PENDING")
+                .label("Closing pending balance")
+                .quantity(0.0)
+                .unitPrice(0.0)
+                .amount(roundTo2(closingPendingAmount))
+                .note("Total pending by end of invoice month.")
+                .build());
+        return items;
+    }
+
+    private CustomerSubscriptionInvoiceSummaryResponse toSubscriptionInvoiceSummary(
+            CustomerSubscriptionInvoiceResponse invoice
+    ) {
+        return CustomerSubscriptionInvoiceSummaryResponse.builder()
+                .customerId(invoice.getCustomerId())
+                .customerName(invoice.getCustomerName())
+                .customerType(invoice.getCustomerType())
+                .routeName(invoice.getRouteName())
+                .month(invoice.getMonth())
+                .invoiceNumber(invoice.getInvoiceNumber())
+                .issueDate(invoice.getIssueDate())
+                .dueDate(invoice.getDueDate())
+                .plannedAmount(invoice.getPlannedAmount())
+                .holidayCreditAmount(invoice.getHolidayCreditAmount())
+                .billedAmount(invoice.getBilledAmount())
+                .receivedAmount(invoice.getReceivedAmount())
+                .pendingAmount(invoice.getPendingAmount())
+                .openingPendingAmount(invoice.getOpeningPendingAmount())
+                .closingPendingAmount(invoice.getClosingPendingAmount())
+                .addOnBilledAmount(invoice.getAddOnBilledAmount())
+                .underDeliveryCreditAmount(invoice.getUnderDeliveryCreditAmount())
+                .prorationFactor(invoice.getProrationFactor())
+                .build();
     }
 
     private double roundTo2(double value) {

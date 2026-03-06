@@ -4,6 +4,8 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
+import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceSummaryResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkRequest;
@@ -84,6 +86,27 @@ public class SaleController {
     ) {
         String effectiveMonth = month != null ? month : YearMonth.now().toString();
         return saleService.subscriptionStatement(customerId, effectiveMonth, includeDaily);
+    }
+
+    @GetMapping("/subscription-invoice")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public CustomerSubscriptionInvoiceResponse subscriptionInvoice(
+            @RequestParam String customerId,
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false, defaultValue = "false") boolean includeDaily
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        return saleService.subscriptionInvoice(customerId, effectiveMonth, includeDaily);
+    }
+
+    @GetMapping("/subscription-invoices")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public List<CustomerSubscriptionInvoiceSummaryResponse> subscriptionInvoices(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) CustomerType customerType
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        return saleService.subscriptionInvoices(effectiveMonth, customerType);
     }
 
     @GetMapping("/override-audits")
