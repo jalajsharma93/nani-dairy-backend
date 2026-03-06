@@ -8,6 +8,7 @@ import net.nani.dairy.sales.dto.CreateDeliveryTaskRequest;
 import net.nani.dairy.sales.dto.DeliveryDayPlanTriggerResponse;
 import net.nani.dairy.sales.dto.CreateDeliveryRunClosureRequest;
 import net.nani.dairy.sales.dto.DeliveryRunClosureResponse;
+import net.nani.dairy.sales.dto.DeliveryRouteOptimizationResponse;
 import net.nani.dairy.sales.dto.DeliveryTaskResponse;
 import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskAssigneeRequest;
@@ -29,6 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDate;
 import java.util.List;
+import net.nani.dairy.milk.Shift;
 
 @RestController
 @RequestMapping("/api/delivery-tasks")
@@ -124,12 +126,30 @@ public class DeliveryTaskController {
     public DeliveryDayPlanTriggerResponse triggerDayPlan(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
             @RequestParam(defaultValue = "true") boolean autoAssign,
+            @RequestParam(defaultValue = "true") boolean optimize,
             Authentication authentication
     ) {
         return deliveryTaskService.triggerDayPlan(
                 date != null ? date : LocalDate.now(),
                 actor(authentication),
-                autoAssign
+                autoAssign,
+                optimize
+        );
+    }
+
+    @PostMapping("/optimize")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public DeliveryRouteOptimizationResponse optimizeRoutes(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) Shift shift,
+            @RequestParam(required = false) String routeName,
+            Authentication authentication
+    ) {
+        return deliveryTaskService.optimizeRoutes(
+                date != null ? date : LocalDate.now(),
+                shift,
+                routeName,
+                actor(authentication)
         );
     }
 

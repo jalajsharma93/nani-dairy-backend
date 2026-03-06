@@ -24,8 +24,8 @@ public class DeliveryDayPlannerScheduler {
     public void triggerDayPlanner() {
         LocalDate today = LocalDate.now();
         try {
-            deliveryTaskService.triggerDayPlan(today, "system-day-planner", true);
-            deliveryTaskService.triggerDayPlan(today.plusDays(1), "system-day-planner", false);
+            deliveryTaskService.triggerDayPlan(today, "system-day-planner", true, true);
+            deliveryTaskService.triggerDayPlan(today.plusDays(1), "system-day-planner", false, true);
         } catch (Exception ex) {
             log.error("Delivery day planner scheduler failed", ex);
         }

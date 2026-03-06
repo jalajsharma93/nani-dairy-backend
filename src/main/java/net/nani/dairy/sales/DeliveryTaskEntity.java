@@ -70,6 +70,24 @@ public class DeliveryTaskEntity {
     @Column(name = "preferred_time")
     private LocalTime preferredTime;
 
+    @Column(name = "optimized_stop_order")
+    private Integer optimizedStopOrder;
+
+    @Column(name = "planned_eta")
+    private LocalTime plannedEta;
+
+    @Column(name = "sla_due_time")
+    private LocalTime slaDueTime;
+
+    @Column(name = "sla_breached")
+    private Boolean slaBreached;
+
+    @Column(name = "sla_delay_minutes")
+    private Integer slaDelayMinutes;
+
+    @Column(name = "optimized_at")
+    private OffsetDateTime optimizedAt;
+
     @Column(name = "planned_qty_liters", nullable = false)
     private double plannedQtyLiters;
 

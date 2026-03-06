@@ -7,6 +7,7 @@ import net.nani.dairy.health.MedicalTreatmentRepository;
 import net.nani.dairy.milk.MilkBatchRepository;
 import net.nani.dairy.milk.MilkEntryRepository;
 import net.nani.dairy.milk.QcStatus;
+import net.nani.dairy.milk.Shift;
 import net.nani.dairy.sales.dto.CustomerLedgerRowResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementDailyRowResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
@@ -1049,11 +1050,42 @@ public class SaleService {
     }
 
     @Transactional
-    public DeliveryChecklistItemResponse updateDelivery(String saleId, UpdateSaleDeliveryRequest req, String actorUsername) {
+    public DeliveryChecklistItemResponse updateDelivery(
+            String saleId,
+            UpdateSaleDeliveryRequest req,
+            String actorUsername,
+            boolean privilegedActor
+    ) {
         SaleEntity entity = saleRepository.findById(saleId)
                 .orElseThrow(() -> new IllegalArgumentException("Sale not found"));
 
         boolean delivered = Boolean.TRUE.equals(req.getDelivered());
+        if (delivered && entity.getProductType() == ProductType.MILK) {
+            LocalDate effectiveBatchDate = entity.getBatchDate() != null ? entity.getBatchDate() : entity.getDispatchDate();
+            Shift effectiveBatchShift = entity.getBatchShift() != null ? entity.getBatchShift() : Shift.AM;
+            boolean overrideWithdrawal = Boolean.TRUE.equals(req.getOverrideWithdrawalLock());
+
+            if (overrideWithdrawal && !privilegedActor) {
+                throw new IllegalArgumentException("Only ADMIN/MANAGER can override withdrawal lock");
+            }
+
+            validateMilkRule(
+                    entity.getProductType(),
+                    effectiveBatchDate,
+                    effectiveBatchShift,
+                    overrideWithdrawal,
+                    req.getOverrideReason(),
+                    entity.getSaleId(),
+                    entity.getDispatchDate(),
+                    entity.getCustomerName(),
+                    actorUsername,
+                    "DELIVERY"
+            );
+
+            entity.setBatchDate(effectiveBatchDate);
+            entity.setBatchShift(effectiveBatchShift);
+        }
+
         entity.setDelivered(delivered);
         entity.setDeliveryNote(trimToNull(req.getDeliveryNote()));
 

@@ -24,4 +24,7 @@ public class DeliveryReconciliationRowResponse {
     private double deliveredQty;
     private double collectedAmount;
     private double pendingAmount;
+    private long onTimeDeliveredTasks;
+    private long slaBreachedDeliveredTasks;
+    private double avgDelayMinutesForDelivered;
 }

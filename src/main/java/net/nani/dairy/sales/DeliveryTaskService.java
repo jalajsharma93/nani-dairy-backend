@@ -14,6 +14,7 @@ import net.nani.dairy.sales.dto.CreateSaleRequest;
 import net.nani.dairy.sales.dto.DeliveryDayPlanTriggerResponse;
 import net.nani.dairy.sales.dto.DeliveryReconciliationRowResponse;
 import net.nani.dairy.sales.dto.DeliveryRunClosureResponse;
+import net.nani.dairy.sales.dto.DeliveryRouteOptimizationResponse;
 import net.nani.dairy.sales.dto.DeliveryTaskResponse;
 import net.nani.dairy.sales.dto.SaleResponse;
 import net.nani.dairy.sales.dto.SubscriptionGenerationPreviewItemResponse;
@@ -29,6 +30,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
@@ -52,6 +54,10 @@ import java.util.UUID;
 public class DeliveryTaskService {
 
     private static final DateTimeFormatter SOURCE_TIME = DateTimeFormatter.ofPattern("HHmm");
+    private static final LocalTime AM_ROUTE_START = LocalTime.of(5, 30);
+    private static final LocalTime PM_ROUTE_START = LocalTime.of(16, 30);
+    private static final int DELIVERY_SLOT_MINUTES = 15;
+    private static final int SLA_GRACE_MINUTES = 45;
 
     private final DeliveryTaskRepository deliveryTaskRepository;
     private final CustomerRecordRepository customerRecordRepository;
@@ -71,11 +77,12 @@ public class DeliveryTaskService {
             boolean privilegedActor
     ) {
         LocalDate effectiveDate = date != null ? date : LocalDate.now();
-        generateSubscriptionTasks(effectiveDate, actorUsername);
+        String normalizedActor = normalizeActor(actorUsername);
+        generateSubscriptionTasks(effectiveDate, normalizedActor);
+        optimizeRoutesIfNeeded(effectiveDate, normalizedActor);
         List<DeliveryTaskEntity> rows = status == null
                 ? deliveryTaskRepository.findByTaskDate(effectiveDate)
                 : deliveryTaskRepository.findByTaskDateAndStatus(effectiveDate, status);
-        String normalizedActor = normalizeActor(actorUsername);
 
         if (!privilegedActor) {
             rows = rows.stream()
@@ -90,6 +97,105 @@ public class DeliveryTaskService {
                 .sorted(deliverySort())
                 .map(this::toResponse)
                 .toList();
+    }
+
+    @Transactional
+    public DeliveryRouteOptimizationResponse optimizeRoutes(
+            LocalDate date,
+            Shift shift,
+            String routeName,
+            String actorUsername
+    ) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        String normalizedRouteName = trimToNull(routeName);
+        String actor = normalizeActor(actorUsername);
+        OffsetDateTime optimizedAt = OffsetDateTime.now();
+
+        List<DeliveryTaskEntity> scopedRows = deliveryTaskRepository.findByTaskDate(effectiveDate).stream()
+                .filter(row -> shift == null || (row.getTaskShift() != null ? row.getTaskShift() : Shift.AM) == shift)
+                .filter(row -> normalizedRouteName == null
+                        || sortable(row.getRouteName()).equals(sortable(normalizedRouteName)))
+                .toList();
+
+        if (scopedRows.isEmpty()) {
+            return DeliveryRouteOptimizationResponse.builder()
+                    .date(effectiveDate)
+                    .shift(shift)
+                    .routeName(normalizedRouteName)
+                    .optimizedTasks(0)
+                    .optimizedRoutes(0)
+                    .pendingTasksInScope(0)
+                    .deliveredTasksInScope(0)
+                    .actor(actor)
+                    .optimizedAt(optimizedAt)
+                    .build();
+        }
+
+        long pendingTasks = scopedRows.stream()
+                .filter(row -> (row.getStatus() == null ? DeliveryTaskStatus.PENDING : row.getStatus()) == DeliveryTaskStatus.PENDING)
+                .count();
+        long deliveredTasks = scopedRows.stream()
+                .filter(row -> (row.getStatus() == null ? DeliveryTaskStatus.PENDING : row.getStatus()) == DeliveryTaskStatus.DELIVERED)
+                .count();
+
+        Map<RouteScopeKey, List<DeliveryTaskEntity>> byScope = new LinkedHashMap<>();
+        for (DeliveryTaskEntity row : scopedRows) {
+            Shift rowShift = row.getTaskShift() != null ? row.getTaskShift() : Shift.AM;
+            String rowRoute = trimToNull(row.getRouteName());
+            RouteScopeKey key = new RouteScopeKey(
+                    rowRoute == null ? "UNASSIGNED_ROUTE" : rowRoute,
+                    rowShift
+            );
+            byScope.computeIfAbsent(key, ignored -> new ArrayList<>()).add(row);
+        }
+
+        int optimizedTasks = 0;
+        int optimizedRoutes = 0;
+        List<DeliveryTaskEntity> updates = new ArrayList<>();
+
+        for (Map.Entry<RouteScopeKey, List<DeliveryTaskEntity>> entry : byScope.entrySet()) {
+            List<DeliveryTaskEntity> rows = entry.getValue();
+            if (rows.isEmpty()) {
+                continue;
+            }
+            optimizedRoutes += 1;
+            rows.sort(routeOptimizationSort());
+
+            LocalTime cursor = routeStartTime(entry.getKey().shift());
+            int stopNo = 1;
+            for (DeliveryTaskEntity row : rows) {
+                LocalTime preferred = row.getPreferredTime();
+                LocalTime eta = preferred != null && preferred.isAfter(cursor) ? preferred : cursor;
+                LocalTime due = (preferred != null ? preferred : eta).plusMinutes(SLA_GRACE_MINUTES);
+
+                row.setOptimizedStopOrder(stopNo);
+                row.setPlannedEta(eta);
+                row.setSlaDueTime(due);
+                row.setOptimizedAt(optimizedAt);
+                applySlaOutcome(row);
+
+                stopNo += 1;
+                optimizedTasks += 1;
+                cursor = eta.plusMinutes(DELIVERY_SLOT_MINUTES);
+                updates.add(row);
+            }
+        }
+
+        if (!updates.isEmpty()) {
+            deliveryTaskRepository.saveAll(updates);
+        }
+
+        return DeliveryRouteOptimizationResponse.builder()
+                .date(effectiveDate)
+                .shift(shift)
+                .routeName(normalizedRouteName)
+                .optimizedTasks(optimizedTasks)
+                .optimizedRoutes(optimizedRoutes)
+                .pendingTasksInScope(pendingTasks)
+                .deliveredTasksInScope(deliveredTasks)
+                .actor(actor)
+                .optimizedAt(optimizedAt)
+                .build();
     }
 
     @Transactional
@@ -196,11 +302,27 @@ public class DeliveryTaskService {
     }
 
     @Transactional
-    public DeliveryDayPlanTriggerResponse triggerDayPlan(LocalDate date, String actorUsername, boolean autoAssign) {
+    public DeliveryDayPlanTriggerResponse triggerDayPlan(
+            LocalDate date,
+            String actorUsername,
+            boolean autoAssign,
+            boolean optimize
+    ) {
         LocalDate effectiveDate = date != null ? date : LocalDate.now();
         String actor = normalizeActor(actorUsername);
         int generated = generateSubscriptionTasks(effectiveDate, actor);
         int autoAssigned = autoAssign ? autoAssignPendingTasks(effectiveDate, actor) : 0;
+        DeliveryRouteOptimizationResponse optimization = optimize
+                ? optimizeRoutes(effectiveDate, null, null, actor)
+                : DeliveryRouteOptimizationResponse.builder()
+                .date(effectiveDate)
+                .optimizedTasks(0)
+                .optimizedRoutes(0)
+                .pendingTasksInScope(0)
+                .deliveredTasksInScope(0)
+                .actor(actor)
+                .optimizedAt(OffsetDateTime.now())
+                .build();
 
         List<DeliveryTaskEntity> rows = deliveryTaskRepository.findByTaskDate(effectiveDate);
         long total = rows.size();
@@ -216,6 +338,8 @@ public class DeliveryTaskService {
                 .date(effectiveDate)
                 .generatedTasks(generated)
                 .autoAssignedTasks(autoAssigned)
+                .optimizedTasks(optimization.getOptimizedTasks())
+                .optimizedRoutes(optimization.getOptimizedRoutes())
                 .totalTasks(total)
                 .pendingTasks(pending)
                 .unassignedPendingTasks(unassignedPending)
@@ -635,6 +759,11 @@ public class DeliveryTaskService {
             entity.setDeliveredQtyLiters(req.getDeliveredQtyLiters());
         }
 
+        boolean overrideWithdrawalLock = Boolean.TRUE.equals(req.getOverrideWithdrawalLock());
+        if (overrideWithdrawalLock && !privilegedActor) {
+            throw new IllegalArgumentException("Only ADMIN/MANAGER can override withdrawal lock");
+        }
+
         if (nextStatus == DeliveryTaskStatus.DELIVERED) {
             if (entity.getDeliveredQtyLiters() == null) {
                 entity.setDeliveredQtyLiters(entity.getPlannedQtyLiters());
@@ -645,15 +774,24 @@ public class DeliveryTaskService {
             validateMilkDeliveryEligibility(entity, entity.getDeliveredQtyLiters());
             entity.setCompletedAt(OffsetDateTime.now());
             entity.setCompletedBy(normalizedActor);
+            applySlaOutcome(entity);
 
             if (!saleAlreadyRecorded) {
-                SaleResponse sale = createSaleFromTask(entity, req.getCollectedAmount(), normalizedActor);
+                SaleResponse sale = createSaleFromTask(
+                        entity,
+                        req.getCollectedAmount(),
+                        normalizedActor,
+                        overrideWithdrawalLock,
+                        req.getOverrideReason(),
+                        privilegedActor
+                );
                 entity.setSaleId(sale.getSaleId());
                 entity.setSaleRecordedAt(OffsetDateTime.now());
             }
         } else {
             entity.setCompletedAt(null);
             entity.setCompletedBy(null);
+            applySlaOutcome(entity);
         }
 
         if (req.getNotes() != null) {
@@ -695,6 +833,8 @@ public class DeliveryTaskService {
                         .status(item.getStatus())
                         .deliveredQtyLiters(item.getDeliveredQtyLiters())
                         .collectedAmount(item.getCollectedAmount())
+                        .overrideWithdrawalLock(item.getOverrideWithdrawalLock())
+                        .overrideReason(item.getOverrideReason())
                         .notes(item.getNotes())
                         .build();
 
@@ -784,6 +924,12 @@ public class DeliveryTaskService {
                     acc.deliveredQty += task.getDeliveredQtyLiters() != null
                             ? task.getDeliveredQtyLiters()
                             : task.getPlannedQtyLiters();
+                    if (Boolean.TRUE.equals(task.getSlaBreached())) {
+                        acc.slaBreachedDeliveredTasks += 1;
+                    } else {
+                        acc.onTimeDeliveredTasks += 1;
+                    }
+                    acc.totalDelayMinutesForDelivered += Math.max(0, task.getSlaDelayMinutes() == null ? 0 : task.getSlaDelayMinutes());
                 }
                 case SKIPPED -> acc.skippedTasks += 1;
                 case PENDING -> acc.pendingTasks += 1;
@@ -809,6 +955,11 @@ public class DeliveryTaskService {
                     .deliveredQty(roundTo2(acc.deliveredQty))
                     .collectedAmount(roundTo2(acc.collectedAmount))
                     .pendingAmount(roundTo2(acc.pendingAmount))
+                    .onTimeDeliveredTasks(acc.onTimeDeliveredTasks)
+                    .slaBreachedDeliveredTasks(acc.slaBreachedDeliveredTasks)
+                    .avgDelayMinutesForDelivered(roundTo2(
+                            acc.deliveredTasks == 0 ? 0.0 : (acc.totalDelayMinutesForDelivered / (double) acc.deliveredTasks)
+                    ))
                     .build());
         }
 
@@ -816,12 +967,23 @@ public class DeliveryTaskService {
         return rows;
     }
 
-    private SaleResponse createSaleFromTask(DeliveryTaskEntity entity, Double collectedAmount, String actorUsername) {
+    private SaleResponse createSaleFromTask(
+            DeliveryTaskEntity entity,
+            Double collectedAmount,
+            String actorUsername,
+            boolean overrideWithdrawalLock,
+            String overrideReason,
+            boolean privilegedActor
+    ) {
         CustomerRecordEntity linkedCustomer = null;
         String normalizedCustomerId = trimToNull(entity.getCustomerId());
         if (normalizedCustomerId != null) {
             linkedCustomer = customerRecordRepository.findById(normalizedCustomerId)
                     .orElseThrow(() -> new IllegalArgumentException("Linked customer not found for delivery task"));
+        }
+
+        if (overrideWithdrawalLock && !privilegedActor) {
+            throw new IllegalArgumentException("Only ADMIN/MANAGER can override withdrawal lock");
         }
 
         ProductType productType = entity.getProductType() != null ? entity.getProductType() : ProductType.MILK;
@@ -846,6 +1008,8 @@ public class DeliveryTaskService {
                 .batchShift(passShift)
                 .routeName(entity.getRouteName())
                 .collectionPoint(linkedCustomer != null ? linkedCustomer.getCollectionPoint() : null)
+                .overrideWithdrawalLock(overrideWithdrawalLock)
+                .overrideReason(overrideWithdrawalLock ? trimToNull(overrideReason) : null)
                 .notes("Auto sale from delivery task " + entity.getDeliveryTaskId())
                 .build();
 
@@ -1280,8 +1444,50 @@ public class DeliveryTaskService {
         return note.toString();
     }
 
+    private void optimizeRoutesIfNeeded(LocalDate date, String actorUsername) {
+        List<DeliveryTaskEntity> rows = deliveryTaskRepository.findByTaskDate(date);
+        boolean needsOptimization = rows.stream().anyMatch(row ->
+                row.getOptimizedStopOrder() == null
+                        || row.getPlannedEta() == null
+                        || row.getSlaDueTime() == null
+                        || ((row.getStatus() == DeliveryTaskStatus.DELIVERED)
+                        && row.getCompletedAt() != null
+                        && row.getSlaBreached() == null)
+        );
+        if (needsOptimization) {
+            optimizeRoutes(date, null, null, actorUsername);
+        }
+    }
+
+    private Comparator<DeliveryTaskEntity> routeOptimizationSort() {
+        return Comparator
+                .comparing((DeliveryTaskEntity row) -> row.getPreferredTime(), Comparator.nullsLast(LocalTime::compareTo))
+                .thenComparing(row -> sortable(row.getCustomerName()))
+                .thenComparing(DeliveryTaskEntity::getDeliveryTaskId);
+    }
+
+    private LocalTime routeStartTime(Shift shift) {
+        Shift effectiveShift = shift != null ? shift : Shift.AM;
+        return effectiveShift == Shift.PM ? PM_ROUTE_START : AM_ROUTE_START;
+    }
+
+    private void applySlaOutcome(DeliveryTaskEntity row) {
+        DeliveryTaskStatus status = row.getStatus() == null ? DeliveryTaskStatus.PENDING : row.getStatus();
+        if (status != DeliveryTaskStatus.DELIVERED || row.getCompletedAt() == null || row.getSlaDueTime() == null) {
+            row.setSlaBreached(null);
+            row.setSlaDelayMinutes(null);
+            return;
+        }
+        long delayMinutes = Duration.between(row.getSlaDueTime(), row.getCompletedAt().toLocalTime()).toMinutes();
+        boolean breached = delayMinutes > 0;
+        row.setSlaBreached(breached);
+        row.setSlaDelayMinutes(breached ? (int) Math.min(Integer.MAX_VALUE, delayMinutes) : 0);
+    }
+
     private Comparator<DeliveryTaskEntity> deliverySort() {
         return Comparator.comparing((DeliveryTaskEntity row) -> sortable(row.getRouteName()))
+                .thenComparing(row -> row.getOptimizedStopOrder() == null ? Integer.MAX_VALUE : row.getOptimizedStopOrder())
+                .thenComparing(row -> row.getPlannedEta() != null ? row.getPlannedEta().toString() : "")
                 .thenComparing(row -> row.getPreferredTime() != null ? row.getPreferredTime().toString() : "")
                 .thenComparing(row -> sortable(row.getCustomerName()))
                 .thenComparing(row -> (row.getProductType() != null ? row.getProductType() : ProductType.MILK).name())
@@ -1317,6 +1523,12 @@ public class DeliveryTaskService {
                 .productType(entity.getProductType())
                 .taskShift(entity.getTaskShift())
                 .preferredTime(entity.getPreferredTime())
+                .optimizedStopOrder(entity.getOptimizedStopOrder())
+                .plannedEta(entity.getPlannedEta())
+                .slaDueTime(entity.getSlaDueTime())
+                .slaBreached(entity.getSlaBreached())
+                .slaDelayMinutes(entity.getSlaDelayMinutes())
+                .optimizedAt(entity.getOptimizedAt())
                 .plannedQtyLiters(entity.getPlannedQtyLiters())
                 .unitPrice(entity.getUnitPrice())
                 .paymentMode(entity.getPaymentMode())
@@ -1359,16 +1571,22 @@ public class DeliveryTaskService {
                 .build();
     }
 
+    private record RouteScopeKey(String routeName, Shift shift) {
+    }
+
     private static class DeliveryReconciliationAccumulator {
         private final String deliveryUsername;
         private long assignedTasks;
         private long deliveredTasks;
         private long skippedTasks;
         private long pendingTasks;
+        private long onTimeDeliveredTasks;
+        private long slaBreachedDeliveredTasks;
         private double plannedQty;
         private double deliveredQty;
         private double collectedAmount;
         private double pendingAmount;
+        private double totalDelayMinutesForDelivered;
 
         private DeliveryReconciliationAccumulator(String deliveryUsername) {
             this.deliveryUsername = deliveryUsername;

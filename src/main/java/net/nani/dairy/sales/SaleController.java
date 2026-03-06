@@ -160,10 +160,30 @@ public class SaleController {
             @Valid @RequestBody UpdateSaleDeliveryRequest req,
             Authentication authentication
     ) {
-        return saleService.updateDelivery(saleId, req, actor(authentication));
+        return saleService.updateDelivery(
+                saleId,
+                req,
+                actor(authentication),
+                hasAnyRole(authentication, "ADMIN", "MANAGER")
+        );
     }
 
     private String actor(Authentication authentication) {
         return authentication != null ? authentication.getName() : "unknown";
+    }
+
+    private boolean hasAnyRole(Authentication authentication, String... roles) {
+        if (authentication == null || authentication.getAuthorities() == null) {
+            return false;
+        }
+        for (var authority : authentication.getAuthorities()) {
+            String value = authority == null ? "" : authority.getAuthority();
+            for (String role : roles) {
+                if (("ROLE_" + role).equalsIgnoreCase(value)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

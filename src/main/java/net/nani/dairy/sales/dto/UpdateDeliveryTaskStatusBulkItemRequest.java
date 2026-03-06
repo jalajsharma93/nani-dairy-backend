@@ -31,6 +31,11 @@ public class UpdateDeliveryTaskStatusBulkItemRequest {
     @PositiveOrZero
     private Double collectedAmount;
 
+    private Boolean overrideWithdrawalLock;
+
+    @Size(max = 700)
+    private String overrideReason;
+
     @Size(max = 500)
     private String notes;
 }

@@ -31,6 +31,12 @@ public class DeliveryTaskResponse {
     private ProductType productType;
     private Shift taskShift;
     private LocalTime preferredTime;
+    private Integer optimizedStopOrder;
+    private LocalTime plannedEta;
+    private LocalTime slaDueTime;
+    private Boolean slaBreached;
+    private Integer slaDelayMinutes;
+    private OffsetDateTime optimizedAt;
     private double plannedQtyLiters;
     private double unitPrice;
     private PaymentMode paymentMode;
