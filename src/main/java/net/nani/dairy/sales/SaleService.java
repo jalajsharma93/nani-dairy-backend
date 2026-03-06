@@ -27,6 +27,8 @@ import net.nani.dairy.sales.dto.SaleComplianceOverrideAuditResponse;
 import net.nani.dairy.sales.dto.SaleResponse;
 import net.nani.dairy.sales.dto.SettlementReconciliationRowResponse;
 import net.nani.dairy.sales.dto.SalesSummaryResponse;
+import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusUpdateResponse;
+import net.nani.dairy.sales.dto.UpdateSubscriptionInvoiceStatusRequest;
 import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
 import net.nani.dairy.sales.dto.UpdateSaleRequest;
 import org.springframework.stereotype.Service;
@@ -62,6 +64,7 @@ public class SaleService {
     private final AnimalRepository animalRepository;
     private final CustomerRecordRepository customerRecordRepository;
     private final CustomerSubscriptionLineRepository subscriptionLineRepository;
+    private final CustomerSubscriptionInvoiceRepository subscriptionInvoiceRepository;
     private final SaleComplianceOverrideAuditRepository saleComplianceOverrideAuditRepository;
     private final TransactionTemplate transactionTemplate;
 
@@ -472,63 +475,18 @@ public class SaleService {
         YearMonth month = parseYearMonth(monthText);
         CustomerRecordEntity customer = customerRecordRepository.findById(normalizedCustomerId)
                 .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
+        String monthKey = month.toString();
+        CustomerSubscriptionInvoiceEntity existing = subscriptionInvoiceRepository
+                .findByCustomerIdAndInvoiceMonth(normalizedCustomerId, monthKey)
+                .orElse(null);
 
-        CustomerSubscriptionStatementResponse statement = subscriptionStatement(
-                normalizedCustomerId,
-                month.toString(),
-                includeDaily
-        );
+        if (existing != null && existing.getStatus() != SubscriptionInvoiceStatus.DRAFT) {
+            return toSubscriptionInvoiceResponse(existing, List.of());
+        }
 
-        LocalDate from = month.atDay(1);
-        LocalDate to = month.atEndOfMonth();
-        double openingPendingAmount = roundTo2(sumPending(findSalesBeforeDateForCustomer(customer, from)));
-        double closingPendingAmount = roundTo2(sumPending(findSalesUpToDateForCustomer(customer, to)));
-        double addOnBilledAmount = roundTo2(Math.max(0, statement.getBilledAmount() - statement.getPlannedAmount()));
-        double underDeliveryCreditAmount = roundTo2(Math.max(0, statement.getPlannedAmount() - statement.getBilledAmount()));
-        LocalDate issueDate = to;
-        LocalDate dueDate = to.plusDays(3);
-
-        return CustomerSubscriptionInvoiceResponse.builder()
-                .customerId(customer.getCustomerId())
-                .customerName(customer.getCustomerName())
-                .customerType(customer.getCustomerType())
-                .routeName(customer.getRouteName())
-                .collectionPoint(customer.getCollectionPoint())
-                .month(month.toString())
-                .dateFrom(from)
-                .dateTo(to)
-                .invoiceNumber(buildInvoiceNumber(customer, month))
-                .issueDate(issueDate)
-                .dueDate(dueDate)
-                .subscriptionActive(statement.isSubscriptionActive())
-                .pricingMode(statement.getPricingMode())
-                .prorationFactor(statement.getProrationFactor())
-                .cycleDays(statement.getCycleDays())
-                .activePlanDays(statement.getActivePlanDays())
-                .pausedDays(statement.getPausedDays())
-                .skipDays(statement.getSkipDays())
-                .billedDays(statement.getBilledDays())
-                .plannedQty(statement.getPlannedQty())
-                .plannedAmount(statement.getPlannedAmount())
-                .holidayCreditAmount(statement.getHolidayCreditAmount())
-                .billedQty(statement.getBilledQty())
-                .billedAmount(statement.getBilledAmount())
-                .receivedAmount(statement.getReceivedAmount())
-                .pendingAmount(statement.getPendingAmount())
-                .addOnBilledAmount(addOnBilledAmount)
-                .underDeliveryCreditAmount(underDeliveryCreditAmount)
-                .openingPendingAmount(openingPendingAmount)
-                .closingPendingAmount(closingPendingAmount)
-                .currentRunningBalance(roundTo2(safeDouble(customer.getRunningBalance())))
-                .invoiceLineItems(buildInvoiceLineItems(
-                        statement,
-                        openingPendingAmount,
-                        closingPendingAmount,
-                        addOnBilledAmount,
-                        underDeliveryCreditAmount
-                ))
-                .dailyRows(statement.getDailyRows())
-                .build();
+        CustomerSubscriptionInvoiceResponse computed = buildComputedSubscriptionInvoice(customer, month, includeDaily);
+        CustomerSubscriptionInvoiceEntity entity = upsertDraftSubscriptionInvoice(customer, month, computed, existing);
+        return toSubscriptionInvoiceResponse(entity, computed.getDailyRows());
     }
 
     public List<CustomerSubscriptionInvoiceSummaryResponse> subscriptionInvoices(
@@ -545,6 +503,108 @@ public class SaleService {
                 )
                 .map(customer -> toSubscriptionInvoiceSummary(subscriptionInvoice(customer.getCustomerId(), month.toString(), false)))
                 .toList();
+    }
+
+    @Transactional
+    public SubscriptionInvoiceStatusUpdateResponse finalizeSubscriptionInvoice(
+            UpdateSubscriptionInvoiceStatusRequest req,
+            String actorUsername
+    ) {
+        String customerId = normalizeRequired(req.getCustomerId(), "customerId is required");
+        YearMonth month = parseYearMonth(req.getMonth());
+        String actor = normalizeActor(actorUsername);
+
+        // Ensure draft snapshot is available/up-to-date before transition.
+        subscriptionInvoice(customerId, month.toString(), false);
+
+        CustomerSubscriptionInvoiceEntity entity = subscriptionInvoiceRepository
+                .findByCustomerIdAndInvoiceMonth(customerId, month.toString())
+                .orElseThrow(() -> new IllegalArgumentException("Subscription invoice not found"));
+
+        SubscriptionInvoiceStatus previous = entity.getStatus();
+        if (previous == SubscriptionInvoiceStatus.POSTED) {
+            throw new IllegalArgumentException("Posted invoice cannot be finalized again");
+        }
+        if (previous == SubscriptionInvoiceStatus.FINALIZED) {
+            return toStatusUpdateResponse(entity, previous, actor);
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        entity.setStatus(SubscriptionInvoiceStatus.FINALIZED);
+        entity.setStatusNote(trimToNull(req.getNote()));
+        entity.setLastStatusUpdatedAt(now);
+        entity.setLastStatusUpdatedBy(actor);
+        entity.setFinalizedAt(now);
+        entity.setFinalizedBy(actor);
+        subscriptionInvoiceRepository.save(entity);
+        return toStatusUpdateResponse(entity, previous, actor);
+    }
+
+    @Transactional
+    public SubscriptionInvoiceStatusUpdateResponse postSubscriptionInvoice(
+            UpdateSubscriptionInvoiceStatusRequest req,
+            String actorUsername
+    ) {
+        String customerId = normalizeRequired(req.getCustomerId(), "customerId is required");
+        YearMonth month = parseYearMonth(req.getMonth());
+        String actor = normalizeActor(actorUsername);
+
+        CustomerSubscriptionInvoiceEntity entity = subscriptionInvoiceRepository
+                .findByCustomerIdAndInvoiceMonth(customerId, month.toString())
+                .orElseThrow(() -> new IllegalArgumentException("Subscription invoice not found"));
+
+        SubscriptionInvoiceStatus previous = entity.getStatus();
+        if (previous == SubscriptionInvoiceStatus.POSTED) {
+            return toStatusUpdateResponse(entity, previous, actor);
+        }
+        if (previous != SubscriptionInvoiceStatus.FINALIZED) {
+            throw new IllegalArgumentException("Only FINALIZED invoice can be posted");
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        entity.setStatus(SubscriptionInvoiceStatus.POSTED);
+        entity.setStatusNote(trimToNull(req.getNote()));
+        entity.setLastStatusUpdatedAt(now);
+        entity.setLastStatusUpdatedBy(actor);
+        entity.setPostedAt(now);
+        entity.setPostedBy(actor);
+        subscriptionInvoiceRepository.save(entity);
+        return toStatusUpdateResponse(entity, previous, actor);
+    }
+
+    @Transactional
+    public SubscriptionInvoiceStatusUpdateResponse reopenSubscriptionInvoice(
+            UpdateSubscriptionInvoiceStatusRequest req,
+            String actorUsername
+    ) {
+        String customerId = normalizeRequired(req.getCustomerId(), "customerId is required");
+        YearMonth month = parseYearMonth(req.getMonth());
+        String actor = normalizeActor(actorUsername);
+        String reason = trimToNull(req.getOverrideReason());
+        if (reason == null) {
+            throw new IllegalArgumentException("overrideReason is required to reopen invoice");
+        }
+
+        CustomerSubscriptionInvoiceEntity entity = subscriptionInvoiceRepository
+                .findByCustomerIdAndInvoiceMonth(customerId, month.toString())
+                .orElseThrow(() -> new IllegalArgumentException("Subscription invoice not found"));
+
+        SubscriptionInvoiceStatus previous = entity.getStatus();
+        if (previous == SubscriptionInvoiceStatus.DRAFT) {
+            return toStatusUpdateResponse(entity, previous, actor);
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        entity.setStatus(SubscriptionInvoiceStatus.DRAFT);
+        entity.setStatusNote("Reopened with override: " + reason + appendNoteSuffix(req.getNote()));
+        entity.setLastStatusUpdatedAt(now);
+        entity.setLastStatusUpdatedBy(actor);
+        entity.setPostedAt(null);
+        entity.setPostedBy(null);
+        entity.setFinalizedAt(null);
+        entity.setFinalizedBy(null);
+        subscriptionInvoiceRepository.save(entity);
+        return toStatusUpdateResponse(entity, previous, actor);
     }
 
     public List<SaleComplianceOverrideAuditResponse> overrideAudits(LocalDate from, LocalDate to) {
@@ -1150,6 +1210,214 @@ public class SaleService {
         return "INV-" + month.toString().replace("-", "") + "-" + suffix;
     }
 
+    private CustomerSubscriptionInvoiceResponse buildComputedSubscriptionInvoice(
+            CustomerRecordEntity customer,
+            YearMonth month,
+            boolean includeDaily
+    ) {
+        CustomerSubscriptionStatementResponse statement = subscriptionStatement(
+                customer.getCustomerId(),
+                month.toString(),
+                includeDaily
+        );
+
+        LocalDate from = month.atDay(1);
+        LocalDate to = month.atEndOfMonth();
+        double openingPendingAmount = roundTo2(sumPending(findSalesBeforeDateForCustomer(customer, from)));
+        double closingPendingAmount = roundTo2(sumPending(findSalesUpToDateForCustomer(customer, to)));
+        double addOnBilledAmount = roundTo2(Math.max(0, statement.getBilledAmount() - statement.getPlannedAmount()));
+        double underDeliveryCreditAmount = roundTo2(Math.max(0, statement.getPlannedAmount() - statement.getBilledAmount()));
+        LocalDate issueDate = to;
+        LocalDate dueDate = to.plusDays(3);
+
+        return CustomerSubscriptionInvoiceResponse.builder()
+                .customerId(customer.getCustomerId())
+                .customerName(customer.getCustomerName())
+                .customerType(customer.getCustomerType())
+                .routeName(customer.getRouteName())
+                .collectionPoint(customer.getCollectionPoint())
+                .month(month.toString())
+                .dateFrom(from)
+                .dateTo(to)
+                .invoiceNumber(buildInvoiceNumber(customer, month))
+                .issueDate(issueDate)
+                .dueDate(dueDate)
+                .status(SubscriptionInvoiceStatus.DRAFT)
+                .statusNote(null)
+                .lastStatusUpdatedAt(null)
+                .lastStatusUpdatedBy(null)
+                .finalizedAt(null)
+                .finalizedBy(null)
+                .postedAt(null)
+                .postedBy(null)
+                .subscriptionActive(statement.isSubscriptionActive())
+                .pricingMode(statement.getPricingMode())
+                .prorationFactor(statement.getProrationFactor())
+                .cycleDays(statement.getCycleDays())
+                .activePlanDays(statement.getActivePlanDays())
+                .pausedDays(statement.getPausedDays())
+                .skipDays(statement.getSkipDays())
+                .billedDays(statement.getBilledDays())
+                .plannedQty(statement.getPlannedQty())
+                .plannedAmount(statement.getPlannedAmount())
+                .holidayCreditAmount(statement.getHolidayCreditAmount())
+                .billedQty(statement.getBilledQty())
+                .billedAmount(statement.getBilledAmount())
+                .receivedAmount(statement.getReceivedAmount())
+                .pendingAmount(statement.getPendingAmount())
+                .addOnBilledAmount(addOnBilledAmount)
+                .underDeliveryCreditAmount(underDeliveryCreditAmount)
+                .openingPendingAmount(openingPendingAmount)
+                .closingPendingAmount(closingPendingAmount)
+                .currentRunningBalance(roundTo2(safeDouble(customer.getRunningBalance())))
+                .invoiceLineItems(buildInvoiceLineItems(
+                        statement,
+                        openingPendingAmount,
+                        closingPendingAmount,
+                        addOnBilledAmount,
+                        underDeliveryCreditAmount
+                ))
+                .dailyRows(statement.getDailyRows())
+                .build();
+    }
+
+    private CustomerSubscriptionInvoiceEntity upsertDraftSubscriptionInvoice(
+            CustomerRecordEntity customer,
+            YearMonth month,
+            CustomerSubscriptionInvoiceResponse computed,
+            CustomerSubscriptionInvoiceEntity existing
+    ) {
+        CustomerSubscriptionInvoiceEntity entity = existing != null
+                ? existing
+                : CustomerSubscriptionInvoiceEntity.builder()
+                .subscriptionInvoiceId("SUBINV_" + UUID.randomUUID().toString().substring(0, 8))
+                .customerId(customer.getCustomerId())
+                .invoiceMonth(month.toString())
+                .build();
+
+        if (existing != null && existing.getStatus() != SubscriptionInvoiceStatus.DRAFT) {
+            return existing;
+        }
+
+        entity.setCustomerName(customer.getCustomerName());
+        entity.setCustomerType(customer.getCustomerType());
+        entity.setRouteName(customer.getRouteName());
+        entity.setCollectionPoint(customer.getCollectionPoint());
+        entity.setInvoiceNumber(computed.getInvoiceNumber());
+        entity.setDateFrom(computed.getDateFrom());
+        entity.setDateTo(computed.getDateTo());
+        entity.setIssueDate(computed.getIssueDate());
+        entity.setDueDate(computed.getDueDate());
+        entity.setSubscriptionActive(computed.isSubscriptionActive());
+        entity.setPricingMode(computed.getPricingMode());
+        entity.setStatus(SubscriptionInvoiceStatus.DRAFT);
+        entity.setProrationFactor(computed.getProrationFactor());
+        entity.setCycleDays(computed.getCycleDays());
+        entity.setActivePlanDays(computed.getActivePlanDays());
+        entity.setPausedDays(computed.getPausedDays());
+        entity.setSkipDays(computed.getSkipDays());
+        entity.setBilledDays(computed.getBilledDays());
+        entity.setPlannedQty(computed.getPlannedQty());
+        entity.setPlannedAmount(computed.getPlannedAmount());
+        entity.setHolidayCreditAmount(computed.getHolidayCreditAmount());
+        entity.setBilledQty(computed.getBilledQty());
+        entity.setBilledAmount(computed.getBilledAmount());
+        entity.setReceivedAmount(computed.getReceivedAmount());
+        entity.setPendingAmount(computed.getPendingAmount());
+        entity.setAddOnBilledAmount(computed.getAddOnBilledAmount());
+        entity.setUnderDeliveryCreditAmount(computed.getUnderDeliveryCreditAmount());
+        entity.setOpeningPendingAmount(computed.getOpeningPendingAmount());
+        entity.setClosingPendingAmount(computed.getClosingPendingAmount());
+        entity.setCurrentRunningBalance(computed.getCurrentRunningBalance());
+        if (entity.getLastStatusUpdatedAt() == null) {
+            entity.setLastStatusUpdatedAt(OffsetDateTime.now());
+        }
+        return subscriptionInvoiceRepository.save(entity);
+    }
+
+    private CustomerSubscriptionInvoiceResponse toSubscriptionInvoiceResponse(
+            CustomerSubscriptionInvoiceEntity entity,
+            List<CustomerSubscriptionStatementDailyRowResponse> dailyRows
+    ) {
+        CustomerSubscriptionStatementResponse syntheticStatement = CustomerSubscriptionStatementResponse.builder()
+                .plannedQty(entity.getPlannedQty())
+                .plannedAmount(entity.getPlannedAmount())
+                .holidayCreditAmount(entity.getHolidayCreditAmount())
+                .receivedAmount(entity.getReceivedAmount())
+                .build();
+        return CustomerSubscriptionInvoiceResponse.builder()
+                .customerId(entity.getCustomerId())
+                .customerName(entity.getCustomerName())
+                .customerType(entity.getCustomerType())
+                .routeName(entity.getRouteName())
+                .collectionPoint(entity.getCollectionPoint())
+                .month(entity.getInvoiceMonth())
+                .dateFrom(entity.getDateFrom())
+                .dateTo(entity.getDateTo())
+                .invoiceNumber(entity.getInvoiceNumber())
+                .issueDate(entity.getIssueDate())
+                .dueDate(entity.getDueDate())
+                .status(entity.getStatus())
+                .statusNote(entity.getStatusNote())
+                .lastStatusUpdatedAt(entity.getLastStatusUpdatedAt())
+                .lastStatusUpdatedBy(entity.getLastStatusUpdatedBy())
+                .finalizedAt(entity.getFinalizedAt())
+                .finalizedBy(entity.getFinalizedBy())
+                .postedAt(entity.getPostedAt())
+                .postedBy(entity.getPostedBy())
+                .subscriptionActive(entity.isSubscriptionActive())
+                .pricingMode(entity.getPricingMode())
+                .prorationFactor(entity.getProrationFactor())
+                .cycleDays(entity.getCycleDays())
+                .activePlanDays(entity.getActivePlanDays())
+                .pausedDays(entity.getPausedDays())
+                .skipDays(entity.getSkipDays())
+                .billedDays(entity.getBilledDays())
+                .plannedQty(entity.getPlannedQty())
+                .plannedAmount(entity.getPlannedAmount())
+                .holidayCreditAmount(entity.getHolidayCreditAmount())
+                .billedQty(entity.getBilledQty())
+                .billedAmount(entity.getBilledAmount())
+                .receivedAmount(entity.getReceivedAmount())
+                .pendingAmount(entity.getPendingAmount())
+                .addOnBilledAmount(entity.getAddOnBilledAmount())
+                .underDeliveryCreditAmount(entity.getUnderDeliveryCreditAmount())
+                .openingPendingAmount(entity.getOpeningPendingAmount())
+                .closingPendingAmount(entity.getClosingPendingAmount())
+                .currentRunningBalance(entity.getCurrentRunningBalance())
+                .invoiceLineItems(buildInvoiceLineItems(
+                        syntheticStatement,
+                        entity.getOpeningPendingAmount(),
+                        entity.getClosingPendingAmount(),
+                        entity.getAddOnBilledAmount(),
+                        entity.getUnderDeliveryCreditAmount()
+                ))
+                .dailyRows(dailyRows == null ? List.of() : dailyRows)
+                .build();
+    }
+
+    private SubscriptionInvoiceStatusUpdateResponse toStatusUpdateResponse(
+            CustomerSubscriptionInvoiceEntity entity,
+            SubscriptionInvoiceStatus previousStatus,
+            String actor
+    ) {
+        return SubscriptionInvoiceStatusUpdateResponse.builder()
+                .customerId(entity.getCustomerId())
+                .month(entity.getInvoiceMonth())
+                .invoiceNumber(entity.getInvoiceNumber())
+                .previousStatus(previousStatus)
+                .currentStatus(entity.getStatus())
+                .statusNote(entity.getStatusNote())
+                .updatedAt(entity.getLastStatusUpdatedAt())
+                .updatedBy(trimToNull(entity.getLastStatusUpdatedBy()) != null ? entity.getLastStatusUpdatedBy() : actor)
+                .build();
+    }
+
+    private String appendNoteSuffix(String note) {
+        String normalized = trimToNull(note);
+        return normalized == null ? "" : " | Note: " + normalized;
+    }
+
     private List<SaleEntity> findSalesBeforeDateForCustomer(CustomerRecordEntity customer, LocalDate beforeDate) {
         if (customer == null) {
             return List.of();
@@ -1289,6 +1557,8 @@ public class SaleService {
                 .routeName(invoice.getRouteName())
                 .month(invoice.getMonth())
                 .invoiceNumber(invoice.getInvoiceNumber())
+                .status(invoice.getStatus())
+                .lastStatusUpdatedAt(invoice.getLastStatusUpdatedAt())
                 .issueDate(invoice.getIssueDate())
                 .dueDate(invoice.getDueDate())
                 .plannedAmount(invoice.getPlannedAmount())
@@ -1737,6 +2007,14 @@ public class SaleService {
         if (value == null) return null;
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String normalizeRequired(String value, String message) {
+        String normalized = trimToNull(value);
+        if (normalized == null) {
+            throw new IllegalArgumentException(message);
+        }
+        return normalized;
     }
 
     private String normalizeActor(String actorUsername) {

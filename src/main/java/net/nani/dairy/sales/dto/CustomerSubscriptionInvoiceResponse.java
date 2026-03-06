@@ -6,8 +6,10 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import net.nani.dairy.sales.CustomerType;
+import net.nani.dairy.sales.SubscriptionInvoiceStatus;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.List;
 
 @Getter
@@ -29,6 +31,14 @@ public class CustomerSubscriptionInvoiceResponse {
     private String invoiceNumber;
     private LocalDate issueDate;
     private LocalDate dueDate;
+    private SubscriptionInvoiceStatus status;
+    private String statusNote;
+    private OffsetDateTime lastStatusUpdatedAt;
+    private String lastStatusUpdatedBy;
+    private OffsetDateTime finalizedAt;
+    private String finalizedBy;
+    private OffsetDateTime postedAt;
+    private String postedBy;
 
     private boolean subscriptionActive;
     private String pricingMode;

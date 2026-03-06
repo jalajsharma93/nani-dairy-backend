@@ -6,8 +6,10 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import net.nani.dairy.sales.CustomerType;
+import net.nani.dairy.sales.SubscriptionInvoiceStatus;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 
 @Getter
 @Setter
@@ -22,6 +24,8 @@ public class CustomerSubscriptionInvoiceSummaryResponse {
     private String routeName;
     private String month;
     private String invoiceNumber;
+    private SubscriptionInvoiceStatus status;
+    private OffsetDateTime lastStatusUpdatedAt;
     private LocalDate issueDate;
     private LocalDate dueDate;
     private double plannedAmount;

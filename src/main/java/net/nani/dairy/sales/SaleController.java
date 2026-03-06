@@ -17,6 +17,8 @@ import net.nani.dairy.sales.dto.SaleComplianceOverrideAuditResponse;
 import net.nani.dairy.sales.dto.SaleResponse;
 import net.nani.dairy.sales.dto.SettlementReconciliationRowResponse;
 import net.nani.dairy.sales.dto.SalesSummaryResponse;
+import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusUpdateResponse;
+import net.nani.dairy.sales.dto.UpdateSubscriptionInvoiceStatusRequest;
 import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
 import net.nani.dairy.sales.dto.UpdateSaleRequest;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -107,6 +109,33 @@ public class SaleController {
     ) {
         String effectiveMonth = month != null ? month : YearMonth.now().toString();
         return saleService.subscriptionInvoices(effectiveMonth, customerType);
+    }
+
+    @PostMapping("/subscription-invoice/finalize")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public SubscriptionInvoiceStatusUpdateResponse finalizeSubscriptionInvoice(
+            @Valid @RequestBody UpdateSubscriptionInvoiceStatusRequest req,
+            Authentication authentication
+    ) {
+        return saleService.finalizeSubscriptionInvoice(req, actor(authentication));
+    }
+
+    @PostMapping("/subscription-invoice/post")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public SubscriptionInvoiceStatusUpdateResponse postSubscriptionInvoice(
+            @Valid @RequestBody UpdateSubscriptionInvoiceStatusRequest req,
+            Authentication authentication
+    ) {
+        return saleService.postSubscriptionInvoice(req, actor(authentication));
+    }
+
+    @PostMapping("/subscription-invoice/reopen")
+    @PreAuthorize("hasRole('ADMIN')")
+    public SubscriptionInvoiceStatusUpdateResponse reopenSubscriptionInvoice(
+            @Valid @RequestBody UpdateSubscriptionInvoiceStatusRequest req,
+            Authentication authentication
+    ) {
+        return saleService.reopenSubscriptionInvoice(req, actor(authentication));
     }
 
     @GetMapping("/override-audits")
