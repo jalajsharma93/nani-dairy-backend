@@ -12,10 +12,12 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -197,6 +199,58 @@ public class HealthService {
                 .build();
     }
 
+    public HealthProtocolResponse healthProtocol(String animalId, LocalDate date, Integer windowDays) {
+        String normalizedAnimalId = normalizeAnimalId(animalId);
+        AnimalEntity animal = animalRepository.findById(normalizedAnimalId)
+                .orElseThrow(() -> new IllegalArgumentException("Animal not found for animalId"));
+
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        int safeWindowDays = sanitizeWindowDays(windowDays);
+        LocalDate toDate = effectiveDate.plusDays(safeWindowDays);
+        LocalDate fromDate = effectiveDate.minusDays(30);
+
+        List<VaccinationEntity> vaccinationRows = vaccinationRepository.findByAnimalIdOrderByDoseDateDescCreatedAtDesc(normalizedAnimalId);
+        List<DewormingEntity> dewormingRows = dewormingRepository.findByAnimalIdOrderByDoseDateDescCreatedAtDesc(normalizedAnimalId);
+        List<BreedingEventEntity> breedingRows = breedingEventRepository.findByAnimalIdOrderByHeatDateDescCreatedAtDesc(normalizedAnimalId);
+        List<MilkEntryEntity> milkRows = milkEntryRepository.findByAnimalIdAndDateBetweenOrderByDateDescCreatedAtDesc(
+                normalizedAnimalId,
+                fromDate,
+                effectiveDate
+        );
+
+        List<HealthProtocolItemResponse> items = new ArrayList<>();
+        addRoutineProtocolItems(animal, breedingRows, effectiveDate, items);
+        addVaccinationProtocolItems(vaccinationRows, effectiveDate, toDate, items);
+        addDewormingProtocolItems(dewormingRows, effectiveDate, toDate, items);
+        addBreedingProtocolItems(breedingRows, effectiveDate, toDate, items);
+        addMastitisProtocolItems(milkRows, effectiveDate, items);
+        addLowYieldProtocolItems(animal, milkRows, effectiveDate, items);
+
+        items.sort(healthProtocolComparator());
+
+        Long highPriorityCount = items.stream().filter(i -> i.getPriority() == WorklistPriority.HIGH).count();
+        Long mediumPriorityCount = items.stream().filter(i -> i.getPriority() == WorklistPriority.MEDIUM).count();
+        Long lowPriorityCount = items.stream().filter(i -> i.getPriority() == WorklistPriority.LOW).count();
+        Long ageDays = ageDays(animal.getDateOfBirth(), effectiveDate);
+        Integer ageMonths = ageMonths(animal.getDateOfBirth(), effectiveDate);
+
+        return HealthProtocolResponse.builder()
+                .date(effectiveDate)
+                .windowDays(safeWindowDays)
+                .animalId(animal.getAnimalId())
+                .animalTag(animal.getTag())
+                .animalStatus(animal.getStatus())
+                .growthStage(animal.getGrowthStage())
+                .ageDays(ageDays)
+                .ageMonths(ageMonths)
+                .totalItems(items.size())
+                .highPriorityCount(highPriorityCount)
+                .mediumPriorityCount(mediumPriorityCount)
+                .lowPriorityCount(lowPriorityCount)
+                .items(items)
+                .build();
+    }
+
     public List<BreedingEventResponse> listBreedingEvents(String animalId) {
         String normalizedAnimalId = normalizeAnimalId(animalId);
         validateAnimal(normalizedAnimalId);
@@ -289,6 +343,483 @@ public class HealthService {
                         )
                 )
                 .build();
+    }
+
+    private void addRoutineProtocolItems(
+            AnimalEntity animal,
+            List<BreedingEventEntity> breedingRows,
+            LocalDate effectiveDate,
+            List<HealthProtocolItemResponse> items
+    ) {
+        addProtocolItem(
+                items,
+                "OBS_FEED_WATER",
+                "OBSERVATION",
+                "Feed and water intake check",
+                "Confirm appetite and water intake are normal compared to this animal baseline.",
+                WorklistPriority.MEDIUM,
+                WorklistDueStatus.DUE_TODAY,
+                effectiveDate,
+                animal.getAnimalId()
+        );
+        addProtocolItem(
+                items,
+                "OBS_ACTIVITY",
+                "OBSERVATION",
+                "Rumination and activity check",
+                "Observe rumination, alertness, gait and general behavior change.",
+                WorklistPriority.MEDIUM,
+                WorklistDueStatus.DUE_TODAY,
+                effectiveDate,
+                animal.getAnimalId()
+        );
+        addProtocolItem(
+                items,
+                "OBS_DUNG_URINE",
+                "OBSERVATION",
+                "Dung and urine consistency check",
+                "Check stool and urine consistency/frequency for early digestive or urinary issues.",
+                WorklistPriority.MEDIUM,
+                WorklistDueStatus.DUE_TODAY,
+                effectiveDate,
+                animal.getAnimalId()
+        );
+
+        if (animal.getStatus() == AnimalStatus.LACTATING) {
+            addProtocolItem(
+                    items,
+                    "LAC_UDDER",
+                    "MILK_HEALTH",
+                    "Udder and teat exam",
+                    "Check udder heat/swelling, teat injury and pain before milking.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "LAC_MILK_VISUAL",
+                    "MILK_HEALTH",
+                    "Strip-cup milk quality check",
+                    "Verify first streams for clots, flakes, blood, smell or color changes.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "LAC_TEAT_DIP",
+                    "HYGIENE",
+                    "Post-milking teat dip compliance",
+                    "Ensure teat dip is completed to reduce mastitis risk.",
+                    WorklistPriority.MEDIUM,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+        } else if (animal.getStatus() == AnimalStatus.DRY) {
+            addProtocolItem(
+                    items,
+                    "DRY_BCS",
+                    "NUTRITION",
+                    "Dry-period body condition review",
+                    "Track body condition and adjust ration to prevent over/under-conditioning.",
+                    WorklistPriority.MEDIUM,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "DRY_UDDER",
+                    "MILK_HEALTH",
+                    "Dry udder health watch",
+                    "Observe udder for edema, leakage or infection signs during dry period.",
+                    WorklistPriority.MEDIUM,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+        } else if (animal.getStatus() == AnimalStatus.SICK) {
+            addProtocolItem(
+                    items,
+                    "SICK_TEMP",
+                    "CLINICAL",
+                    "Temperature monitoring (2x/day)",
+                    "Record morning and evening temperature and compare with treatment plan.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "SICK_MED",
+                    "CLINICAL",
+                    "Medication compliance check",
+                    "Confirm dose, route and timing adherence for active treatments.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "SICK_ISOLATION",
+                    "BIOSECURITY",
+                    "Isolation and pen hygiene check",
+                    "Verify isolation, bedding hygiene and cross-contamination prevention.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+        }
+
+        Long ageDays = ageDays(animal.getDateOfBirth(), effectiveDate);
+        boolean calfOrGrower = animal.getGrowthStage() == net.nani.dairy.animals.AnimalGrowthStage.CALF
+                || animal.getGrowthStage() == net.nani.dairy.animals.AnimalGrowthStage.GROWER
+                || (ageDays != null && ageDays <= 365);
+        if (calfOrGrower) {
+            addProtocolItem(
+                    items,
+                    "CALF_GI_RESP",
+                    "CALF_CARE",
+                    "Calf respiratory/GI symptom check",
+                    "Check nasal discharge, cough, diarrhea and dehydration signs.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "CALF_FEED_PROGRESS",
+                    "CALF_CARE",
+                    "Calf feeding progress check",
+                    "Confirm milk/starter feed intake and transition progress by age.",
+                    WorklistPriority.MEDIUM,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    animal.getAnimalId()
+            );
+            addProtocolItem(
+                    items,
+                    "CALF_WEIGHT_WEEKLY",
+                    "CALF_CARE",
+                    "Weekly weight trend check",
+                    "Track growth trend and review if weight gain is below expected curve.",
+                    WorklistPriority.MEDIUM,
+                    WorklistDueStatus.DUE_SOON,
+                    effectiveDate.plusDays(7),
+                    animal.getAnimalId()
+            );
+        }
+
+        BreedingEventEntity openPregnancy = breedingRows.stream()
+                .filter(row -> row.getPregnancyResult() == BreedingPregnancyResult.PREGNANT)
+                .filter(row -> row.getActualCalvingDate() == null)
+                .filter(row -> row.getExpectedCalvingDate() != null)
+                .min(Comparator.comparing(BreedingEventEntity::getExpectedCalvingDate))
+                .orElse(null);
+        if (openPregnancy != null) {
+            WorklistDueStatus dueStatus = dueStatus(openPregnancy.getExpectedCalvingDate(), effectiveDate);
+            WorklistPriority priority = dueStatus == WorklistDueStatus.OVERDUE ? WorklistPriority.HIGH : WorklistPriority.MEDIUM;
+            addProtocolItem(
+                    items,
+                    "PREG_CALVING_WATCH",
+                    "BREEDING",
+                    "Pregnancy and calving readiness check",
+                    "Review pre-calving signs, calfing kit readiness and assistance plan.",
+                    priority,
+                    dueStatus,
+                    openPregnancy.getExpectedCalvingDate(),
+                    animal.getAnimalId()
+            );
+        }
+    }
+
+    private void addVaccinationProtocolItems(
+            List<VaccinationEntity> vaccinationRows,
+            LocalDate effectiveDate,
+            LocalDate toDate,
+            List<HealthProtocolItemResponse> items
+    ) {
+        Map<String, VaccinationDueCandidate> dueByVaccine = new LinkedHashMap<>();
+        for (VaccinationEntity row : vaccinationRows) {
+            LocalDate dueDate = resolveVaccinationDueDate(row);
+            if (dueDate == null || dueDate.isAfter(toDate)) {
+                continue;
+            }
+            String key = normalizeVaccineKey(row.getVaccineName());
+            VaccinationDueCandidate existing = dueByVaccine.get(key);
+            if (existing == null || dueDate.isBefore(existing.dueDate)) {
+                dueByVaccine.put(key, new VaccinationDueCandidate(row, dueDate));
+            }
+        }
+
+        dueByVaccine.values().stream()
+                .sorted(Comparator.comparing(row -> row.dueDate))
+                .forEach(row -> {
+                    WorklistDueStatus dueStatus = dueStatus(row.dueDate, effectiveDate);
+                    WorklistPriority priority = dueStatus == WorklistDueStatus.DUE_SOON ? WorklistPriority.MEDIUM : WorklistPriority.HIGH;
+                    addProtocolItem(
+                            items,
+                            "VACCINE_DUE",
+                            "PREVENTIVE",
+                            "Vaccination due",
+                            "Vaccine " + row.entity.getVaccineName() + " for " + row.entity.getDiseaseTarget() + " is due.",
+                            priority,
+                            dueStatus,
+                            row.dueDate,
+                            row.entity.getVaccinationId()
+                    );
+                });
+    }
+
+    private void addDewormingProtocolItems(
+            List<DewormingEntity> dewormingRows,
+            LocalDate effectiveDate,
+            LocalDate toDate,
+            List<HealthProtocolItemResponse> items
+    ) {
+        Map<String, DewormingEntity> dueByDrug = new LinkedHashMap<>();
+        for (DewormingEntity row : dewormingRows) {
+            if (row.getNextDueDate() == null || row.getNextDueDate().isAfter(toDate)) {
+                continue;
+            }
+            String key = row.getDrugName() == null ? "" : row.getDrugName().trim().toUpperCase(Locale.ROOT);
+            DewormingEntity existing = dueByDrug.get(key);
+            if (existing == null || row.getNextDueDate().isBefore(existing.getNextDueDate())) {
+                dueByDrug.put(key, row);
+            }
+        }
+
+        dueByDrug.values().stream()
+                .sorted(Comparator.comparing(DewormingEntity::getNextDueDate))
+                .forEach(row -> {
+                    WorklistDueStatus dueStatus = dueStatus(row.getNextDueDate(), effectiveDate);
+                    WorklistPriority priority = dueStatus == WorklistDueStatus.DUE_SOON ? WorklistPriority.MEDIUM : WorklistPriority.HIGH;
+                    addProtocolItem(
+                            items,
+                            "DEWORM_DUE",
+                            "PREVENTIVE",
+                            "Deworming due",
+                            "Deworming follow-up for drug " + row.getDrugName() + " is due.",
+                            priority,
+                            dueStatus,
+                            row.getNextDueDate(),
+                            row.getDewormingId()
+                    );
+                });
+    }
+
+    private void addBreedingProtocolItems(
+            List<BreedingEventEntity> breedingRows,
+            LocalDate effectiveDate,
+            LocalDate toDate,
+            List<HealthProtocolItemResponse> items
+    ) {
+        BreedingProtocolCandidate pregnancyCheck = breedingRows.stream()
+                .filter(row -> row.getInseminationDate() != null)
+                .filter(row -> row.getPregnancyCheckDate() == null)
+                .filter(row -> row.getActualCalvingDate() == null)
+                .map(row -> new BreedingProtocolCandidate(row, row.getInseminationDate().plusDays(PREGNANCY_CHECK_DUE_DAYS)))
+                .filter(row -> !row.dueDate.isAfter(toDate))
+                .min(Comparator.comparing(row -> row.dueDate))
+                .orElse(null);
+        if (pregnancyCheck != null) {
+            WorklistDueStatus dueStatus = dueStatus(pregnancyCheck.dueDate, effectiveDate);
+            WorklistPriority priority = dueStatus == WorklistDueStatus.OVERDUE ? WorklistPriority.HIGH : WorklistPriority.MEDIUM;
+            addProtocolItem(
+                    items,
+                    "PREG_CHECK_DUE",
+                    "BREEDING",
+                    "Pregnancy check due",
+                    "AI on " + pregnancyCheck.entity.getInseminationDate() + " needs pregnancy confirmation.",
+                    priority,
+                    dueStatus,
+                    pregnancyCheck.dueDate,
+                    pregnancyCheck.entity.getBreedingEventId()
+            );
+        }
+
+        BreedingEventEntity calvingWatch = breedingRows.stream()
+                .filter(row -> row.getExpectedCalvingDate() != null)
+                .filter(row -> row.getActualCalvingDate() == null)
+                .filter(row -> !row.getExpectedCalvingDate().isAfter(toDate))
+                .min(Comparator.comparing(BreedingEventEntity::getExpectedCalvingDate))
+                .orElse(null);
+        if (calvingWatch != null) {
+            WorklistDueStatus dueStatus = dueStatus(calvingWatch.getExpectedCalvingDate(), effectiveDate);
+            WorklistPriority priority = dueStatus == WorklistDueStatus.OVERDUE ? WorklistPriority.HIGH : WorklistPriority.MEDIUM;
+            addProtocolItem(
+                    items,
+                    "CALVING_DUE",
+                    "BREEDING",
+                    "Calving watch",
+                    "Expected calving date is " + calvingWatch.getExpectedCalvingDate() + ".",
+                    priority,
+                    dueStatus,
+                    calvingWatch.getExpectedCalvingDate(),
+                    calvingWatch.getBreedingEventId()
+            );
+        }
+
+        LocalDate fromDate = effectiveDate.minusDays(365);
+        long failedAttempts = breedingRows.stream()
+                .filter(row -> row.getInseminationDate() != null)
+                .filter(row -> row.getInseminationDate().isAfter(fromDate.minusDays(1)))
+                .filter(row -> row.getPregnancyResult() == BreedingPregnancyResult.NOT_PREGNANT)
+                .count();
+        if (failedAttempts >= 3) {
+            addProtocolItem(
+                    items,
+                    "REPEAT_BREEDER",
+                    "BREEDING",
+                    "Repeat breeder risk",
+                    failedAttempts + " unsuccessful breeding attempts in the last 365 days.",
+                    WorklistPriority.HIGH,
+                    WorklistDueStatus.DUE_TODAY,
+                    effectiveDate,
+                    "RBR"
+            );
+        }
+    }
+
+    private void addMastitisProtocolItems(
+            List<MilkEntryEntity> milkRows,
+            LocalDate effectiveDate,
+            List<HealthProtocolItemResponse> items
+    ) {
+        LocalDate fromDate = effectiveDate.minusDays(14);
+        MilkEntryEntity latestFlagged = milkRows.stream()
+                .filter(row -> !row.getDate().isBefore(fromDate))
+                .filter(row -> row.getQcStatus() == QcStatus.HOLD || row.getQcStatus() == QcStatus.REJECT)
+                .filter(row -> containsMastitisSignal(row.getRejectionReason(), row.getSmellNotes()))
+                .max(Comparator.comparing(MilkEntryEntity::getDate))
+                .orElse(null);
+        if (latestFlagged == null) {
+            return;
+        }
+
+        LocalDate followUpDate = latestFlagged.getDate().plusDays(1);
+        addProtocolItem(
+                items,
+                "MASTITIS_FOLLOW_UP",
+                "CLINICAL",
+                "Mastitis follow-up check",
+                "QC flagged mastitis signal on " + latestFlagged.getDate() + ". Re-check udder and milk quality.",
+                WorklistPriority.HIGH,
+                dueStatus(followUpDate, effectiveDate),
+                followUpDate,
+                latestFlagged.getMilkEntryId()
+        );
+    }
+
+    private void addLowYieldProtocolItems(
+            AnimalEntity animal,
+            List<MilkEntryEntity> milkRows,
+            LocalDate effectiveDate,
+            List<HealthProtocolItemResponse> items
+    ) {
+        if (animal.getStatus() != AnimalStatus.LACTATING) {
+            return;
+        }
+        if (milkRows.isEmpty()) {
+            return;
+        }
+
+        Map<LocalDate, Double> dailyLiters = new HashMap<>();
+        for (MilkEntryEntity row : milkRows) {
+            dailyLiters.merge(row.getDate(), row.getLiters(), Double::sum);
+        }
+
+        AvgWindow baseline = averageBetween(dailyLiters, effectiveDate.minusDays(9), effectiveDate.minusDays(3));
+        AvgWindow recent = averageBetween(dailyLiters, effectiveDate.minusDays(2), effectiveDate);
+        if (baseline.days < 3 || recent.days < 2 || baseline.avg <= 0.1d) {
+            return;
+        }
+
+        double dropPct = ((baseline.avg - recent.avg) / baseline.avg) * 100d;
+        if (dropPct < LOW_YIELD_DROP_PCT_THRESHOLD) {
+            return;
+        }
+
+        WorklistPriority priority = dropPct >= 40d ? WorklistPriority.HIGH : WorklistPriority.MEDIUM;
+        addProtocolItem(
+                items,
+                "LOW_YIELD_ALERT",
+                "PRODUCTION",
+                "Low yield anomaly follow-up",
+                "Recent " + formatNumber(recent.avg) + " L/day vs baseline " + formatNumber(baseline.avg)
+                        + " L/day (drop " + Math.round(dropPct) + "%). Review feed, health and heat stress.",
+                priority,
+                WorklistDueStatus.DUE_TODAY,
+                effectiveDate,
+                "LYD"
+        );
+    }
+
+    private Comparator<HealthProtocolItemResponse> healthProtocolComparator() {
+        return Comparator
+                .comparingInt((HealthProtocolItemResponse item) -> priorityRank(item.getPriority()))
+                .thenComparingInt(item -> dueStatusRank(item.getDueStatus()))
+                .thenComparing(HealthProtocolItemResponse::getDueDate, Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(item -> item.getCode() == null ? "" : item.getCode())
+                .thenComparing(item -> item.getProtocolId() == null ? "" : item.getProtocolId());
+    }
+
+    private void addProtocolItem(
+            List<HealthProtocolItemResponse> items,
+            String code,
+            String category,
+            String title,
+            String description,
+            WorklistPriority priority,
+            WorklistDueStatus dueStatus,
+            LocalDate dueDate,
+            String sourceId
+    ) {
+        items.add(HealthProtocolItemResponse.builder()
+                .protocolId(buildHealthProtocolId(code, sourceId))
+                .code(code)
+                .category(category)
+                .title(title)
+                .description(description)
+                .priority(priority)
+                .dueStatus(dueStatus)
+                .dueDate(dueDate)
+                .build());
+    }
+
+    private String buildHealthProtocolId(String code, String sourceId) {
+        String safeCode = (code == null ? "ITEM" : code.trim()).replaceAll("[^A-Za-z0-9_-]", "_");
+        String safeSource = (sourceId == null ? "" : sourceId.trim()).replaceAll("[^A-Za-z0-9_-]", "_");
+        if (safeSource.isEmpty()) {
+            safeSource = UUID.randomUUID().toString().substring(0, 8);
+        }
+        return "HPT_" + safeCode + "_" + safeSource;
+    }
+
+    private Long ageDays(LocalDate dateOfBirth, LocalDate effectiveDate) {
+        if (dateOfBirth == null) {
+            return null;
+        }
+        if (dateOfBirth.isAfter(effectiveDate)) {
+            return 0L;
+        }
+        return ChronoUnit.DAYS.between(dateOfBirth, effectiveDate);
+    }
+
+    private Integer ageMonths(LocalDate dateOfBirth, LocalDate effectiveDate) {
+        Long days = ageDays(dateOfBirth, effectiveDate);
+        if (days == null) {
+            return null;
+        }
+        return (int) (days / 30L);
     }
 
     public WorklistResponse todayWorklist(LocalDate date, Integer windowDays) {
@@ -904,6 +1435,16 @@ public class HealthService {
         private final LocalDate dueDate;
 
         private VaccinationDueCandidate(VaccinationEntity entity, LocalDate dueDate) {
+            this.entity = entity;
+            this.dueDate = dueDate;
+        }
+    }
+
+    private static class BreedingProtocolCandidate {
+        private final BreedingEventEntity entity;
+        private final LocalDate dueDate;
+
+        private BreedingProtocolCandidate(BreedingEventEntity entity, LocalDate dueDate) {
             this.entity = entity;
             this.dueDate = dueDate;
         }

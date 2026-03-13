@@ -8,6 +8,7 @@ import net.nani.dairy.health.dto.CreateBreedingEventRequest;
 import net.nani.dairy.health.dto.CreateDewormingRequest;
 import net.nani.dairy.health.dto.CreateVaccinationRequest;
 import net.nani.dairy.health.dto.DewormingResponse;
+import net.nani.dairy.health.dto.HealthProtocolResponse;
 import net.nani.dairy.health.dto.HealthSummaryResponse;
 import net.nani.dairy.health.dto.VaccinationResponse;
 import net.nani.dairy.health.dto.WorklistResponse;
@@ -98,6 +99,15 @@ public class HealthController {
             @RequestParam(required = false, defaultValue = "7") Integer windowDays
     ) {
         return healthService.summary(date, windowDays);
+    }
+
+    @GetMapping("/animals/{animalId}/health-protocol")
+    public HealthProtocolResponse healthProtocol(
+            @PathVariable String animalId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false, defaultValue = "7") Integer windowDays
+    ) {
+        return healthService.healthProtocol(animalId, date, windowDays);
     }
 
     @GetMapping("/worklist/today")
