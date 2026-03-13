@@ -24,4 +24,10 @@ public class FileUploadController {
     public FileUploadResponse uploadPrescription(@RequestPart("file") MultipartFile file) {
         return fileUploadService.savePrescription(file);
     }
+
+    @PostMapping(value = "/qc-labs", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','VET')")
+    public FileUploadResponse uploadQcLab(@RequestPart("file") MultipartFile file) {
+        return fileUploadService.saveQcLab(file);
+    }
 }

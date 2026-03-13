@@ -21,6 +21,14 @@ public class FileUploadService {
     private static final Path UPLOADS_ROOT = Path.of("data", "uploads").toAbsolutePath().normalize();
 
     public FileUploadResponse savePrescription(MultipartFile file) {
+        return save(file, "prescriptions", "RX");
+    }
+
+    public FileUploadResponse saveQcLab(MultipartFile file) {
+        return save(file, "qc-labs", "QC");
+    }
+
+    private FileUploadResponse save(MultipartFile file, String categoryFolder, String idPrefix) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("file is required");
         }
@@ -32,10 +40,10 @@ public class FileUploadService {
         }
 
         String safeExt = ext.toLowerCase(Locale.ROOT);
-        String generatedName = "RX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12) + "." + safeExt;
+        String generatedName = idPrefix + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12) + "." + safeExt;
         String folder = LocalDate.now().toString();
 
-        Path targetDir = UPLOADS_ROOT.resolve(Path.of("prescriptions", folder)).normalize();
+        Path targetDir = UPLOADS_ROOT.resolve(Path.of(categoryFolder, folder)).normalize();
         Path targetFile = targetDir.resolve(generatedName).normalize();
 
         if (!targetFile.startsWith(UPLOADS_ROOT)) {
@@ -53,7 +61,7 @@ public class FileUploadService {
 
         return FileUploadResponse.builder()
                 .fileName(generatedName)
-                .url("/uploads/prescriptions/" + folder + "/" + generatedName)
+                .url("/uploads/" + categoryFolder + "/" + folder + "/" + generatedName)
                 .contentType(file.getContentType())
                 .sizeBytes(file.getSize())
                 .build();
