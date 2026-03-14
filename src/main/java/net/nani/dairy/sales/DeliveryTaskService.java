@@ -59,6 +59,10 @@ public class DeliveryTaskService {
     private static final int DELIVERY_SLOT_MINUTES = 15;
     private static final int SLA_GRACE_MINUTES = 45;
 
+    private static final String REASON_TASK_ALREADY_EXISTS_PENDING = "TASK_ALREADY_EXISTS_PENDING";
+    private static final String REASON_TASK_ALREADY_EXISTS_DELIVERED = "TASK_ALREADY_EXISTS_DELIVERED";
+    private static final String REASON_TASK_ALREADY_EXISTS_SKIPPED = "TASK_ALREADY_EXISTS_SKIPPED";
+
     private final DeliveryTaskRepository deliveryTaskRepository;
     private final CustomerRecordRepository customerRecordRepository;
     private final CustomerSubscriptionLineRepository subscriptionLineRepository;
@@ -310,6 +314,15 @@ public class DeliveryTaskService {
     ) {
         LocalDate effectiveDate = date != null ? date : LocalDate.now();
         String actor = normalizeActor(actorUsername);
+        SubscriptionGenerationPreviewResponse preview = previewSubscriptionGeneration(effectiveDate);
+        int eligibleCandidates = preview.getEligibleCandidates();
+        int alreadyPlannedCandidates = (int) preview.getItems().stream()
+                .filter(item -> !item.isEligible())
+                .map(SubscriptionGenerationPreviewItemResponse::getReason)
+                .filter(this::isExistingTaskReason)
+                .count();
+        int blockedCandidates = Math.max(0, preview.getSkippedCandidates() - alreadyPlannedCandidates);
+
         int generated = generateSubscriptionTasks(effectiveDate, actor);
         int autoAssigned = autoAssign ? autoAssignPendingTasks(effectiveDate, actor) : 0;
         DeliveryRouteOptimizationResponse optimization = optimize
@@ -337,6 +350,9 @@ public class DeliveryTaskService {
         return DeliveryDayPlanTriggerResponse.builder()
                 .date(effectiveDate)
                 .generatedTasks(generated)
+                .eligibleCandidates(eligibleCandidates)
+                .alreadyPlannedCandidates(alreadyPlannedCandidates)
+                .blockedCandidates(blockedCandidates)
                 .autoAssignedTasks(autoAssigned)
                 .optimizedTasks(optimization.getOptimizedTasks())
                 .optimizedRoutes(optimization.getOptimizedRoutes())
@@ -388,6 +404,17 @@ public class DeliveryTaskService {
                 }
             }
 
+            if (reason == null && customer != null) {
+                String sourceRefId = buildSubscriptionSourceRef(
+                        customer.getCustomerId(),
+                        effectiveDate,
+                        line.getTaskShift() != null ? line.getTaskShift() : Shift.AM,
+                        line.getProductType() != null ? line.getProductType() : ProductType.MILK,
+                        line.getPreferredTime()
+                );
+                reason = existingTaskReason(sourceRefId);
+            }
+
             items.add(SubscriptionGenerationPreviewItemResponse.builder()
                     .source("LINE")
                     .date(effectiveDate)
@@ -425,6 +452,10 @@ public class DeliveryTaskService {
                     amReason = "LEGACY_UNIT_PRICE_NOT_POSITIVE";
                 }
             }
+            if (amReason == null) {
+                String amSourceRefId = buildSubscriptionSourceRef(customer.getCustomerId(), effectiveDate, Shift.AM, ProductType.MILK, null);
+                amReason = existingTaskReason(amSourceRefId);
+            }
             items.add(SubscriptionGenerationPreviewItemResponse.builder()
                     .source("LEGACY")
                     .date(effectiveDate)
@@ -450,6 +481,10 @@ public class DeliveryTaskService {
                 } else if (unitPrice <= 0) {
                     pmReason = "LEGACY_UNIT_PRICE_NOT_POSITIVE";
                 }
+            }
+            if (pmReason == null) {
+                String pmSourceRefId = buildSubscriptionSourceRef(customer.getCustomerId(), effectiveDate, Shift.PM, ProductType.MILK, null);
+                pmReason = existingTaskReason(pmSourceRefId);
             }
             items.add(SubscriptionGenerationPreviewItemResponse.builder()
                     .source("LEGACY")
@@ -1300,6 +1335,11 @@ public class DeliveryTaskService {
             return "SKIP_DATE";
         }
 
+        EnumSet<DayOfWeek> holidayWeekdays = parseActiveDays(customer.getSubscriptionHolidayWeekdaysCsv());
+        if (!holidayWeekdays.isEmpty() && holidayWeekdays.contains(date.getDayOfWeek())) {
+            return "HOLIDAY_WEEKDAY";
+        }
+
         EnumSet<DayOfWeek> lineDays = parseActiveDays(activeDaysCsv);
         if (!lineDays.isEmpty() && !lineDays.contains(date.getDayOfWeek())) {
             return "DAY_NOT_IN_ACTIVE_DAYS";
@@ -1316,6 +1356,33 @@ public class DeliveryTaskService {
             return null;
         }
         return null;
+    }
+
+    private boolean isExistingTaskReason(String reason) {
+        String normalized = trimToNull(reason);
+        if (normalized == null) {
+            return false;
+        }
+        return REASON_TASK_ALREADY_EXISTS_PENDING.equals(normalized)
+                || REASON_TASK_ALREADY_EXISTS_DELIVERED.equals(normalized)
+                || REASON_TASK_ALREADY_EXISTS_SKIPPED.equals(normalized);
+    }
+
+    private String existingTaskReason(String sourceRefId) {
+        String normalizedSourceRefId = trimToNull(sourceRefId);
+        if (normalizedSourceRefId == null) {
+            return null;
+        }
+        DeliveryTaskEntity existing = deliveryTaskRepository.findBySourceRefId(normalizedSourceRefId).orElse(null);
+        if (existing == null) {
+            return null;
+        }
+        DeliveryTaskStatus status = existing.getStatus() == null ? DeliveryTaskStatus.PENDING : existing.getStatus();
+        return switch (status) {
+            case DELIVERED -> REASON_TASK_ALREADY_EXISTS_DELIVERED;
+            case SKIPPED -> REASON_TASK_ALREADY_EXISTS_SKIPPED;
+            case PENDING -> REASON_TASK_ALREADY_EXISTS_PENDING;
+        };
     }
 
     private Set<LocalDate> parseSkipDates(String csv) {
@@ -1437,6 +1504,9 @@ public class DeliveryTaskService {
         }
         if (trimToNull(customer.getSubscriptionSkipDatesCsv()) != null) {
             note.append(" | SkipDates: ").append(customer.getSubscriptionSkipDatesCsv());
+        }
+        if (trimToNull(customer.getSubscriptionHolidayWeekdaysCsv()) != null) {
+            note.append(" | HolidayWeekdays: ").append(customer.getSubscriptionHolidayWeekdaysCsv());
         }
         if (route != null) {
             note.append(" | Route: ").append(route);

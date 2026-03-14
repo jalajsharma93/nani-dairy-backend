@@ -253,6 +253,11 @@ public class MilkBatchService {
                 .highTemperatureHoldCount(e.highTemperatureHoldCount())
                 .lactometerOutOfRangeHoldCount(e.lactometerOutOfRangeHoldCount())
                 .badSmellHoldCount(e.badSmellHoldCount())
+                .abnormalColorHoldCount(e.abnormalColorHoldCount())
+                .highAcidityHoldCount(e.highAcidityHoldCount())
+                .waterAdulterationRejectCount(e.waterAdulterationRejectCount())
+                .antibioticResidueRejectCount(e.antibioticResidueRejectCount())
+                .highBacterialCountHoldCount(e.highBacterialCountHoldCount())
                 .explicitRejectCount(e.explicitRejectCount())
                 .triggerCodes(e.triggerCodes())
                 .build();

@@ -25,6 +25,12 @@ public class MilkEntryResponse {
     private Double lactometer;
     private String smellNotes;
     private String rejectionReason;
+    private String colorObservation;
+    private Double acidity;
+    private Boolean waterAdulteration;
+    private Boolean antibioticResidue;
+    private Double bacterialCount;
+    private String labTestAttachmentUrl;
     private OffsetDateTime createdAt;
     private OffsetDateTime updatedAt;
 }

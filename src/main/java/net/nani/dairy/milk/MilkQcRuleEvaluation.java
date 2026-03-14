@@ -15,6 +15,11 @@ public record MilkQcRuleEvaluation(
         int highTemperatureHoldCount,
         int lactometerOutOfRangeHoldCount,
         int badSmellHoldCount,
+        int abnormalColorHoldCount,
+        int highAcidityHoldCount,
+        int waterAdulterationRejectCount,
+        int antibioticResidueRejectCount,
+        int highBacterialCountHoldCount,
         int explicitRejectCount,
         List<String> triggerCodes
 ) {

@@ -17,6 +17,14 @@ app:
   delivery:
     day-planner-enabled: true
     day-planner-cron: "0 */30 * * * *"
+  tasks:
+    automation-enabled: true
+    automation-cron: "0 */20 * * * *"
+  feed:
+    procurement-automation-enabled: true
+    procurement-automation-cron: "0 10 5 * * *"
+    procurement-lookback-days: 30
+    procurement-horizon-days: 30
 
 logging:
   level:

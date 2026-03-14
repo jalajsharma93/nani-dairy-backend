@@ -34,6 +34,11 @@ public class MilkBatchQcEvaluationResponse {
     private int highTemperatureHoldCount;
     private int lactometerOutOfRangeHoldCount;
     private int badSmellHoldCount;
+    private int abnormalColorHoldCount;
+    private int highAcidityHoldCount;
+    private int waterAdulterationRejectCount;
+    private int antibioticResidueRejectCount;
+    private int highBacterialCountHoldCount;
     private int explicitRejectCount;
 
     private List<String> triggerCodes;

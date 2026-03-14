@@ -74,6 +74,15 @@ public class TaskItemEntity {
     @Column(name = "completed_by", length = 120)
     private String completedBy;
 
+    @Column(name = "reminder_sent_at")
+    private LocalDateTime reminderSentAt;
+
+    @Column(name = "escalated_at")
+    private LocalDateTime escalatedAt;
+
+    @Column(name = "escalation_count", nullable = false, columnDefinition = "integer default 0")
+    private Integer escalationCount;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
@@ -83,6 +92,9 @@ public class TaskItemEntity {
     @PrePersist
     public void prePersist() {
         LocalDateTime now = LocalDateTime.now();
+        if (escalationCount == null) {
+            escalationCount = 0;
+        }
         createdAt = now;
         updatedAt = now;
     }

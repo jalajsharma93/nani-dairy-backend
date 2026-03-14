@@ -7,6 +7,7 @@ import net.nani.dairy.milk.dto.UpdateMilkEntryQcRequest;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.util.Locale;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -111,14 +112,46 @@ public class MilkEntryService {
                 changed = true;
             }
 
+            validateNonNegativeMetric(item.getAcidity(), "acidity");
+            validateNonNegativeMetric(item.getBacterialCount(), "bacterialCount");
+            String colorObservation = normalizeColorObservation(item.getColorObservation());
+            if (!Objects.equals(entity.getColorObservation(), colorObservation)) {
+                entity.setColorObservation(colorObservation);
+                changed = true;
+            }
+            if (!Objects.equals(entity.getAcidity(), item.getAcidity())) {
+                entity.setAcidity(item.getAcidity());
+                changed = true;
+            }
+            if (!Objects.equals(entity.getWaterAdulteration(), item.getWaterAdulteration())) {
+                entity.setWaterAdulteration(item.getWaterAdulteration());
+                changed = true;
+            }
+            if (!Objects.equals(entity.getAntibioticResidue(), item.getAntibioticResidue())) {
+                entity.setAntibioticResidue(item.getAntibioticResidue());
+                changed = true;
+            }
+            if (!Objects.equals(entity.getBacterialCount(), item.getBacterialCount())) {
+                entity.setBacterialCount(item.getBacterialCount());
+                changed = true;
+            }
+
             String smellNotes = trimToNull(item.getSmellNotes());
             String rejectionReason = trimToNull(item.getRejectionReason());
+            if (item.getQcStatus() == QcStatus.REJECT && rejectionReason == null) {
+                throw new IllegalArgumentException("rejectionReason is required when qcStatus is REJECT");
+            }
+            String labTestAttachmentUrl = trimToNull(item.getLabTestAttachmentUrl());
             if (!Objects.equals(entity.getSmellNotes(), smellNotes)) {
                 entity.setSmellNotes(smellNotes);
                 changed = true;
             }
             if (!Objects.equals(entity.getRejectionReason(), rejectionReason)) {
                 entity.setRejectionReason(rejectionReason);
+                changed = true;
+            }
+            if (!Objects.equals(entity.getLabTestAttachmentUrl(), labTestAttachmentUrl)) {
+                entity.setLabTestAttachmentUrl(labTestAttachmentUrl);
                 changed = true;
             }
 
@@ -143,6 +176,15 @@ public class MilkEntryService {
         }
     }
 
+    private void validateNonNegativeMetric(Double value, String fieldName) {
+        if (value == null) {
+            return;
+        }
+        if (Double.isNaN(value) || Double.isInfinite(value) || value < 0) {
+            throw new IllegalArgumentException(fieldName + " must be a non-negative finite number");
+        }
+    }
+
     private String buildId(LocalDate date, Shift shift, String animalId) {
         return "ME_" + date + "_" + shift + "_" + animalId + "_" + UUID.randomUUID().toString().substring(0, 6);
     }
@@ -153,6 +195,14 @@ public class MilkEntryService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String normalizeColorObservation(String value) {
+        String trimmed = trimToNull(value);
+        if (trimmed == null) {
+            return null;
+        }
+        return trimmed.toUpperCase(Locale.ROOT);
     }
 
     private MilkEntryResponse toResponse(MilkEntryEntity e) {
@@ -169,6 +219,12 @@ public class MilkEntryService {
                 .lactometer(e.getLactometer())
                 .smellNotes(e.getSmellNotes())
                 .rejectionReason(e.getRejectionReason())
+                .colorObservation(e.getColorObservation())
+                .acidity(e.getAcidity())
+                .waterAdulteration(e.getWaterAdulteration())
+                .antibioticResidue(e.getAntibioticResidue())
+                .bacterialCount(e.getBacterialCount())
+                .labTestAttachmentUrl(e.getLabTestAttachmentUrl())
                 .createdAt(e.getCreatedAt())
                 .updatedAt(e.getUpdatedAt())
                 .build();

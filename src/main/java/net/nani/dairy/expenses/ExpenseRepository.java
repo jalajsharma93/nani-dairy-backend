@@ -7,6 +7,7 @@ import java.util.List;
 
 public interface ExpenseRepository extends JpaRepository<ExpenseEntity, String> {
     List<ExpenseEntity> findByExpenseDateOrderByCreatedAtDesc(LocalDate expenseDate);
+    List<ExpenseEntity> findByExpenseDateBetweenOrderByExpenseDateAscCreatedAtAsc(LocalDate fromDate, LocalDate toDate);
 
     List<ExpenseEntity> findByCategoryOrderByExpenseDateDescCreatedAtDesc(ExpenseCategory category);
 

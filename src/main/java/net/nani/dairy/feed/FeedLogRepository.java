@@ -7,6 +7,7 @@ import java.util.List;
 
 public interface FeedLogRepository extends JpaRepository<FeedLogEntity, String> {
     List<FeedLogEntity> findByFeedDateOrderByCreatedAtDesc(LocalDate feedDate);
+    List<FeedLogEntity> findByFeedDateBetweenOrderByFeedDateAscCreatedAtAsc(LocalDate fromDate, LocalDate toDate);
 
     List<FeedLogEntity> findByAnimalIdOrderByFeedDateDescCreatedAtDesc(String animalId);
 

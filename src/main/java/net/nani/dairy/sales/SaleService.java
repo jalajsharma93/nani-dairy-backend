@@ -14,6 +14,7 @@ import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceSummaryResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementDailyRowResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionStatementSummaryResponse;
 import net.nani.dairy.sales.dto.CreateSaleRequest;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkItemRequest;
@@ -27,6 +28,7 @@ import net.nani.dairy.sales.dto.SaleComplianceOverrideAuditResponse;
 import net.nani.dairy.sales.dto.SaleResponse;
 import net.nani.dairy.sales.dto.SettlementReconciliationRowResponse;
 import net.nani.dairy.sales.dto.SalesSummaryResponse;
+import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusAuditResponse;
 import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusUpdateResponse;
 import net.nani.dairy.sales.dto.UpdateSubscriptionInvoiceStatusRequest;
 import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
@@ -66,6 +68,7 @@ public class SaleService {
     private final CustomerSubscriptionLineRepository subscriptionLineRepository;
     private final CustomerSubscriptionInvoiceRepository subscriptionInvoiceRepository;
     private final SaleComplianceOverrideAuditRepository saleComplianceOverrideAuditRepository;
+    private final SubscriptionInvoiceStatusAuditRepository subscriptionInvoiceStatusAuditRepository;
     private final TransactionTemplate transactionTemplate;
 
     public List<SaleResponse> list(LocalDate date, CustomerType customerType, ProductType productType) {
@@ -341,67 +344,9 @@ public class SaleService {
         boolean lineBasedPricing = !lines.isEmpty();
         String pricingMode = lineBasedPricing ? "LINE_BASED" : "LEGACY_DAILY";
 
-        java.util.Set<LocalDate> skipDates = parseSkipDates(customer.getSubscriptionSkipDatesCsv());
+        Set<LocalDate> skipDates = parseSkipDates(customer.getSubscriptionSkipDatesCsv());
         LocalDate pausedUntil = customer.getSubscriptionPausedUntil();
-
-        double baselineQty = 0.0;
-        double baselineAmount = 0.0;
-        int baselinePlanDays = 0;
-        double plannedQty = 0.0;
-        double plannedAmount = 0.0;
-        int activePlanDays = 0;
-        int pausedDays = 0;
-        int skipDays = 0;
-
-        List<CustomerSubscriptionStatementDailyRowResponse> dailyRows = includeDaily ? new ArrayList<>() : List.of();
-
-        for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
-            DayPlan baselinePlan = computeDayPlan(customer, lines, date, false, false);
-            DayPlan effectivePlan = computeDayPlan(
-                    customer,
-                    lines,
-                    date,
-                    pausedUntil != null && !date.isAfter(pausedUntil),
-                    skipDates.contains(date)
-            );
-
-            if (baselinePlan.amount > 0) {
-                baselinePlanDays += 1;
-                baselineQty += baselinePlan.qty;
-                baselineAmount += baselinePlan.amount;
-            }
-            if (effectivePlan.amount > 0) {
-                activePlanDays += 1;
-                plannedQty += effectivePlan.qty;
-                plannedAmount += effectivePlan.amount;
-            } else if (baselinePlan.amount > 0 && pausedUntil != null && !date.isAfter(pausedUntil)) {
-                pausedDays += 1;
-            } else if (baselinePlan.amount > 0 && skipDates.contains(date)) {
-                skipDays += 1;
-            }
-
-            if (includeDaily) {
-                String status;
-                if (effectivePlan.paused) {
-                    status = "PAUSED";
-                } else if (effectivePlan.skipped) {
-                    status = "HOLIDAY_SKIP";
-                } else if (effectivePlan.amount > 0) {
-                    status = "PLANNED";
-                } else {
-                    status = "NO_PLAN";
-                }
-                dailyRows.add(
-                        CustomerSubscriptionStatementDailyRowResponse.builder()
-                                .date(date)
-                                .dayOfWeek(date.getDayOfWeek().name())
-                                .status(status)
-                                .expectedQty(roundTo2(effectivePlan.qty))
-                                .expectedAmount(roundTo2(effectivePlan.amount))
-                                .build()
-                );
-            }
-        }
+        EnumSet<DayOfWeek> holidayWeekdays = parseActiveDays(customer.getSubscriptionHolidayWeekdaysCsv());
 
         List<SaleEntity> billedRows = saleRepository.findByDispatchDateBetweenAndCustomerId(from, to, customer.getCustomerId());
         if (billedRows.isEmpty()) {
@@ -418,16 +363,101 @@ public class SaleService {
         double receivedAmount = 0.0;
         double pendingAmount = 0.0;
         LinkedHashSet<LocalDate> billedDates = new LinkedHashSet<>();
+        Map<LocalDate, double[]> billedByDate = new LinkedHashMap<>();
         for (SaleEntity row : billedRows) {
             billedQty += row.getQuantity();
             billedAmount += row.getTotalAmount();
             receivedAmount += row.getReceivedAmount();
             pendingAmount += row.getPendingAmount();
             billedDates.add(row.getDispatchDate());
+
+            double[] bucket = billedByDate.computeIfAbsent(row.getDispatchDate(), ignored -> new double[]{0.0, 0.0});
+            bucket[0] += row.getQuantity();
+            bucket[1] += row.getTotalAmount();
+        }
+
+        double baselineQty = 0.0;
+        double baselineAmount = 0.0;
+        int baselinePlanDays = 0;
+        double plannedQty = 0.0;
+        double plannedAmount = 0.0;
+        int activePlanDays = 0;
+        int pausedDays = 0;
+        int skipDays = 0;
+        int holidayWeekdayDays = 0;
+
+        List<CustomerSubscriptionStatementDailyRowResponse> dailyRows = includeDaily ? new ArrayList<>() : List.of();
+
+        for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
+            DayPlan baselinePlan = computeDayPlan(customer, lines, date, false, false);
+            boolean holidayWeekday = holidayWeekdays.contains(date.getDayOfWeek());
+            DayPlan effectivePlan = computeDayPlan(
+                    customer,
+                    lines,
+                    date,
+                    pausedUntil != null && !date.isAfter(pausedUntil),
+                    skipDates.contains(date) || holidayWeekday
+            );
+
+            if (baselinePlan.amount > 0) {
+                baselinePlanDays += 1;
+                baselineQty += baselinePlan.qty;
+                baselineAmount += baselinePlan.amount;
+            }
+            if (effectivePlan.amount > 0) {
+                activePlanDays += 1;
+                plannedQty += effectivePlan.qty;
+                plannedAmount += effectivePlan.amount;
+            } else if (baselinePlan.amount > 0 && pausedUntil != null && !date.isAfter(pausedUntil)) {
+                pausedDays += 1;
+            } else if (baselinePlan.amount > 0 && holidayWeekday) {
+                holidayWeekdayDays += 1;
+            } else if (baselinePlan.amount > 0 && skipDates.contains(date)) {
+                skipDays += 1;
+            }
+
+            if (includeDaily) {
+                double[] billedBucket = billedByDate.get(date);
+                double billedQtyForDate = billedBucket == null ? 0.0 : billedBucket[0];
+                double billedAmountForDate = billedBucket == null ? 0.0 : billedBucket[1];
+
+                String status;
+                if (effectivePlan.paused) {
+                    status = "PAUSED";
+                } else if (holidayWeekday) {
+                    status = "HOLIDAY_WEEKDAY";
+                } else if (effectivePlan.skipped) {
+                    status = "HOLIDAY_SKIP";
+                } else if (effectivePlan.amount > 0) {
+                    status = "PLANNED";
+                } else if (billedAmountForDate > 0) {
+                    status = "UNPLANNED_BILLED";
+                } else {
+                    status = "NO_PLAN";
+                }
+
+                double expectedQty = roundTo2(effectivePlan.qty);
+                double expectedAmount = roundTo2(effectivePlan.amount);
+                double billedQtyRounded = roundTo2(billedQtyForDate);
+                double billedAmountRounded = roundTo2(billedAmountForDate);
+                dailyRows.add(
+                        CustomerSubscriptionStatementDailyRowResponse.builder()
+                                .date(date)
+                                .dayOfWeek(date.getDayOfWeek().name())
+                                .status(status)
+                                .expectedQty(expectedQty)
+                                .expectedAmount(expectedAmount)
+                                .billedQty(billedQtyRounded)
+                                .billedAmount(billedAmountRounded)
+                                .varianceQty(roundTo2(billedQtyRounded - expectedQty))
+                                .varianceAmount(roundTo2(billedAmountRounded - expectedAmount))
+                                .build()
+                );
+            }
         }
 
         int cycleDays = month.lengthOfMonth();
-        double prorationFactor = cycleDays == 0 ? 0.0 : ((double) activePlanDays / (double) cycleDays);
+        double prorationFactor = baselinePlanDays == 0 ? 0.0 : ((double) activePlanDays / (double) baselinePlanDays);
         double holidayCredit = Math.max(0, baselineAmount - plannedAmount);
         double variance = billedAmount - plannedAmount;
 
@@ -444,6 +474,7 @@ public class SaleService {
                 .activePlanDays(activePlanDays)
                 .pausedDays(pausedDays)
                 .skipDays(skipDays)
+                .holidayWeekdayDays(holidayWeekdayDays)
                 .billedDays(billedDates.size())
                 .prorationFactor(roundTo4(prorationFactor))
                 .baselinePlanQty(roundTo2(baselineQty))
@@ -460,6 +491,83 @@ public class SaleService {
                 .totalPaidToDate(roundTo2(safeDouble(customer.getTotalPaid())))
                 .dailyRows(dailyRows)
                 .build();
+    }
+
+    public List<CustomerSubscriptionStatementSummaryResponse> subscriptionStatements(
+            String monthText,
+            CustomerType customerType
+    ) {
+        YearMonth month = parseYearMonth(monthText);
+        List<CustomerRecordEntity> customers = customerRecordRepository.findByIsActiveAndSubscriptionActive(true, true);
+        return customers.stream()
+                .filter(customer -> customerType == null || customer.getCustomerType() == customerType)
+                .sorted(
+                        Comparator.comparing((CustomerRecordEntity c) -> sortable(c.getRouteName()))
+                                .thenComparing(c -> sortable(c.getCustomerName()))
+                )
+                .map(customer -> {
+                    CustomerSubscriptionStatementResponse statement = subscriptionStatement(
+                            customer.getCustomerId(),
+                            month.toString(),
+                            false
+                    );
+                    return CustomerSubscriptionStatementSummaryResponse.builder()
+                            .customerId(customer.getCustomerId())
+                            .customerName(customer.getCustomerName())
+                            .customerType(customer.getCustomerType())
+                            .routeName(customer.getRouteName())
+                            .month(month.toString())
+                            .pricingMode(statement.getPricingMode())
+                            .prorationFactor(statement.getProrationFactor())
+                            .activePlanDays(statement.getActivePlanDays())
+                            .pausedDays(statement.getPausedDays())
+                            .skipDays(statement.getSkipDays())
+                            .holidayWeekdayDays(statement.getHolidayWeekdayDays())
+                            .billedDays(statement.getBilledDays())
+                            .plannedAmount(statement.getPlannedAmount())
+                            .billedAmount(statement.getBilledAmount())
+                            .receivedAmount(statement.getReceivedAmount())
+                            .pendingAmount(statement.getPendingAmount())
+                            .expectedVsBilledVariance(statement.getExpectedVsBilledVariance())
+                            .currentRunningBalance(statement.getCurrentRunningBalance())
+                            .build();
+                })
+                .toList();
+    }
+
+    public String subscriptionStatementsCsv(
+            String monthText,
+            CustomerType customerType
+    ) {
+        YearMonth month = parseYearMonth(monthText);
+        List<CustomerSubscriptionStatementSummaryResponse> rows = subscriptionStatements(month.toString(), customerType);
+
+        StringBuilder csv = new StringBuilder();
+        csv.append("month,customer_id,customer_name,customer_type,route_name,pricing_mode,proration_factor,active_plan_days,paused_days,skip_days,holiday_weekday_days,billed_days,planned_amount,billed_amount,received_amount,pending_amount,expected_vs_billed_variance,current_running_balance\n");
+
+        for (CustomerSubscriptionStatementSummaryResponse row : rows) {
+            csv.append(csvValue(row.getMonth())).append(",")
+                    .append(csvValue(row.getCustomerId())).append(",")
+                    .append(csvValue(row.getCustomerName())).append(",")
+                    .append(csvValue(row.getCustomerType() == null ? null : row.getCustomerType().name())).append(",")
+                    .append(csvValue(row.getRouteName())).append(",")
+                    .append(csvValue(row.getPricingMode())).append(",")
+                    .append(roundTo4(row.getProrationFactor())).append(",")
+                    .append(row.getActivePlanDays()).append(",")
+                    .append(row.getPausedDays()).append(",")
+                    .append(row.getSkipDays()).append(",")
+                    .append(row.getHolidayWeekdayDays()).append(",")
+                    .append(row.getBilledDays()).append(",")
+                    .append(roundTo2(row.getPlannedAmount())).append(",")
+                    .append(roundTo2(row.getBilledAmount())).append(",")
+                    .append(roundTo2(row.getReceivedAmount())).append(",")
+                    .append(roundTo2(row.getPendingAmount())).append(",")
+                    .append(roundTo2(row.getExpectedVsBilledVariance())).append(",")
+                    .append(roundTo2(row.getCurrentRunningBalance()))
+                    .append("\n");
+        }
+
+        return csv.toString();
     }
 
     public CustomerSubscriptionInvoiceResponse subscriptionInvoice(
@@ -505,6 +613,59 @@ public class SaleService {
                 .toList();
     }
 
+    public String subscriptionInvoicesCsv(
+            String monthText,
+            CustomerType customerType
+    ) {
+        YearMonth month = parseYearMonth(monthText);
+        List<CustomerSubscriptionInvoiceSummaryResponse> rows = subscriptionInvoices(month.toString(), customerType);
+
+        StringBuilder csv = new StringBuilder();
+        csv.append("month,customer_id,customer_name,customer_type,route_name,invoice_number,status,last_status_updated_at,issue_date,due_date,planned_amount,holiday_credit_amount,billed_amount,received_amount,pending_amount,opening_pending_amount,closing_pending_amount,add_on_billed_amount,under_delivery_credit_amount,proration_factor\n");
+
+        for (CustomerSubscriptionInvoiceSummaryResponse row : rows) {
+            csv.append(csvValue(row.getMonth())).append(",")
+                    .append(csvValue(row.getCustomerId())).append(",")
+                    .append(csvValue(row.getCustomerName())).append(",")
+                    .append(csvValue(row.getCustomerType() == null ? null : row.getCustomerType().name())).append(",")
+                    .append(csvValue(row.getRouteName())).append(",")
+                    .append(csvValue(row.getInvoiceNumber())).append(",")
+                    .append(csvValue(row.getStatus() == null ? null : row.getStatus().name())).append(",")
+                    .append(csvValue(row.getLastStatusUpdatedAt() == null ? null : row.getLastStatusUpdatedAt().toString())).append(",")
+                    .append(csvValue(row.getIssueDate() == null ? null : row.getIssueDate().toString())).append(",")
+                    .append(csvValue(row.getDueDate() == null ? null : row.getDueDate().toString())).append(",")
+                    .append(roundTo2(row.getPlannedAmount())).append(",")
+                    .append(roundTo2(row.getHolidayCreditAmount())).append(",")
+                    .append(roundTo2(row.getBilledAmount())).append(",")
+                    .append(roundTo2(row.getReceivedAmount())).append(",")
+                    .append(roundTo2(row.getPendingAmount())).append(",")
+                    .append(roundTo2(row.getOpeningPendingAmount())).append(",")
+                    .append(roundTo2(row.getClosingPendingAmount())).append(",")
+                    .append(roundTo2(row.getAddOnBilledAmount())).append(",")
+                    .append(roundTo2(row.getUnderDeliveryCreditAmount())).append(",")
+                    .append(roundTo4(row.getProrationFactor()))
+                    .append("\n");
+        }
+
+        return csv.toString();
+    }
+
+    public List<SubscriptionInvoiceStatusAuditResponse> subscriptionInvoiceStatusAudits(
+            String monthText,
+            String customerId
+    ) {
+        YearMonth month = parseYearMonth(monthText);
+        String normalizedCustomerId = trimToNull(customerId);
+        List<SubscriptionInvoiceStatusAuditEntity> rows = normalizedCustomerId != null
+                ? subscriptionInvoiceStatusAuditRepository.findByInvoiceMonthAndCustomerIdOrderByCreatedAtDesc(
+                month.toString(),
+                normalizedCustomerId
+        )
+                : subscriptionInvoiceStatusAuditRepository.findByInvoiceMonthOrderByCreatedAtDesc(month.toString());
+
+        return rows.stream().map(this::toSubscriptionInvoiceStatusAuditResponse).toList();
+    }
+
     @Transactional
     public SubscriptionInvoiceStatusUpdateResponse finalizeSubscriptionInvoice(
             UpdateSubscriptionInvoiceStatusRequest req,
@@ -537,6 +698,16 @@ public class SaleService {
         entity.setFinalizedAt(now);
         entity.setFinalizedBy(actor);
         subscriptionInvoiceRepository.save(entity);
+        recordSubscriptionInvoiceStatusAudit(
+                entity,
+                previous,
+                "FINALIZE",
+                actor,
+                trimToNull(req.getNote()),
+                null,
+                false,
+                null
+        );
         return toStatusUpdateResponse(entity, previous, actor);
     }
 
@@ -569,6 +740,16 @@ public class SaleService {
         entity.setPostedAt(now);
         entity.setPostedBy(actor);
         subscriptionInvoiceRepository.save(entity);
+        recordSubscriptionInvoiceStatusAudit(
+                entity,
+                previous,
+                "POST",
+                actor,
+                trimToNull(req.getNote()),
+                null,
+                false,
+                null
+        );
         return toStatusUpdateResponse(entity, previous, actor);
     }
 
@@ -595,8 +776,9 @@ public class SaleService {
         }
 
         OffsetDateTime now = OffsetDateTime.now();
+        String statusNote = "Reopened with override: " + reason + appendNoteSuffix(req.getNote());
         entity.setStatus(SubscriptionInvoiceStatus.DRAFT);
-        entity.setStatusNote("Reopened with override: " + reason + appendNoteSuffix(req.getNote()));
+        entity.setStatusNote(statusNote);
         entity.setLastStatusUpdatedAt(now);
         entity.setLastStatusUpdatedBy(actor);
         entity.setPostedAt(null);
@@ -604,6 +786,16 @@ public class SaleService {
         entity.setFinalizedAt(null);
         entity.setFinalizedBy(null);
         subscriptionInvoiceRepository.save(entity);
+        recordSubscriptionInvoiceStatusAudit(
+                entity,
+                previous,
+                "REOPEN",
+                actor,
+                statusNote,
+                reason,
+                true,
+                actor
+        );
         return toStatusUpdateResponse(entity, previous, actor);
     }
 
@@ -1413,6 +1605,61 @@ public class SaleService {
                 .build();
     }
 
+    private void recordSubscriptionInvoiceStatusAudit(
+            CustomerSubscriptionInvoiceEntity entity,
+            SubscriptionInvoiceStatus previousStatus,
+            String action,
+            String actor,
+            String statusNote,
+            String overrideReason,
+            boolean exceptionOverride,
+            String approvedBy
+    ) {
+        if (entity == null || previousStatus == entity.getStatus()) {
+            return;
+        }
+        subscriptionInvoiceStatusAuditRepository.save(
+                SubscriptionInvoiceStatusAuditEntity.builder()
+                        .subscriptionInvoiceStatusAuditId("SUBINV_AUD_" + UUID.randomUUID().toString().substring(0, 8))
+                        .customerId(entity.getCustomerId())
+                        .customerName(entity.getCustomerName())
+                        .customerType(entity.getCustomerType())
+                        .invoiceMonth(entity.getInvoiceMonth())
+                        .invoiceNumber(entity.getInvoiceNumber())
+                        .previousStatus(previousStatus)
+                        .currentStatus(entity.getStatus())
+                        .action(action)
+                        .statusNote(trimToNull(statusNote))
+                        .overrideReason(trimToNull(overrideReason))
+                        .exceptionOverride(exceptionOverride)
+                        .approvedBy(trimToNull(approvedBy))
+                        .actorUsername(normalizeActor(actor))
+                        .build()
+        );
+    }
+
+    private SubscriptionInvoiceStatusAuditResponse toSubscriptionInvoiceStatusAuditResponse(
+            SubscriptionInvoiceStatusAuditEntity entity
+    ) {
+        return SubscriptionInvoiceStatusAuditResponse.builder()
+                .subscriptionInvoiceStatusAuditId(entity.getSubscriptionInvoiceStatusAuditId())
+                .customerId(entity.getCustomerId())
+                .customerName(entity.getCustomerName())
+                .customerType(entity.getCustomerType())
+                .month(entity.getInvoiceMonth())
+                .invoiceNumber(entity.getInvoiceNumber())
+                .previousStatus(entity.getPreviousStatus())
+                .currentStatus(entity.getCurrentStatus())
+                .action(entity.getAction())
+                .statusNote(entity.getStatusNote())
+                .overrideReason(entity.getOverrideReason())
+                .exceptionOverride(entity.isExceptionOverride())
+                .approvedBy(entity.getApprovedBy())
+                .actorUsername(entity.getActorUsername())
+                .createdAt(entity.getCreatedAt())
+                .build();
+    }
+
     private String appendNoteSuffix(String note) {
         String normalized = trimToNull(note);
         return normalized == null ? "" : " | Note: " + normalized;
@@ -1580,6 +1827,14 @@ public class SaleService {
 
     private double roundTo4(double value) {
         return Math.round(value * 10000.0d) / 10000.0d;
+    }
+
+    private String csvValue(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.replace("\"", "\"\"");
+        return "\"" + normalized + "\"";
     }
 
     @Transactional

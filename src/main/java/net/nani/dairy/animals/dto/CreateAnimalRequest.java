@@ -54,4 +54,7 @@ public class CreateAnimalRequest {
 
     @PositiveOrZero
     private Double weaningWeightKg;
+
+    @Size(max = 300)
+    private String lifecycleReason;
 }

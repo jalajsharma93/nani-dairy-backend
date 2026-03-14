@@ -4,6 +4,9 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import net.nani.dairy.health.dto.CreateMedicalTreatmentRequest;
 import net.nani.dairy.health.dto.MedicalTreatmentResponse;
+import net.nani.dairy.health.dto.TreatmentComplianceSummaryResponse;
+import net.nani.dairy.health.dto.TreatmentTemplateResponse;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -13,8 +16,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
@@ -24,10 +29,24 @@ import java.util.List;
 public class MedicalTreatmentController {
 
     private final MedicalTreatmentService medicalTreatmentService;
+    private final TreatmentTemplateService treatmentTemplateService;
+
+    @GetMapping("/treatments/templates")
+    public List<TreatmentTemplateResponse> listTreatmentTemplates() {
+        return treatmentTemplateService.listTemplates();
+    }
 
     @GetMapping("/animals/{animalId}/treatments")
     public List<MedicalTreatmentResponse> listTreatments(@PathVariable String animalId) {
         return medicalTreatmentService.listTreatments(animalId);
+    }
+
+    @GetMapping("/treatments/compliance-summary")
+    public TreatmentComplianceSummaryResponse complianceSummary(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) String animalId
+    ) {
+        return medicalTreatmentService.complianceSummary(date, animalId);
     }
 
     @PostMapping("/animals/{animalId}/treatments")

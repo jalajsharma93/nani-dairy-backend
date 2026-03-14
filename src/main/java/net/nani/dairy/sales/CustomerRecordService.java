@@ -8,11 +8,14 @@ import net.nani.dairy.sales.dto.UpdateCustomerRecordRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.TreeSet;
 import java.util.UUID;
 
@@ -47,10 +50,12 @@ public class CustomerRecordService {
                 req.getDailySubscriptionQty(),
                 req.getSubscriptionFrequency(),
                 req.getSubscriptionPausedUntil(),
-                req.getSubscriptionSkipDatesCsv()
+                req.getSubscriptionSkipDatesCsv(),
+                req.getSubscriptionHolidayWeekdaysCsv()
         );
         boolean subscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
         String normalizedSkipDates = normalizeSubscriptionSkipDatesCsv(req.getSubscriptionSkipDatesCsv());
+        String normalizedHolidayWeekdays = normalizeHolidayWeekdaysCsv(req.getSubscriptionHolidayWeekdaysCsv());
 
         CustomerRecordEntity entity = CustomerRecordEntity.builder()
                 .customerId(buildId())
@@ -64,6 +69,7 @@ public class CustomerRecordService {
                 .subscriptionFrequency(subscriptionActive ? req.getSubscriptionFrequency() : null)
                 .subscriptionPausedUntil(subscriptionActive ? req.getSubscriptionPausedUntil() : null)
                 .subscriptionSkipDatesCsv(subscriptionActive ? normalizedSkipDates : null)
+                .subscriptionHolidayWeekdaysCsv(subscriptionActive ? normalizedHolidayWeekdays : null)
                 .runningBalance(0.0)
                 .totalPaid(0.0)
                 .lastPayoutDate(null)
@@ -81,10 +87,12 @@ public class CustomerRecordService {
                 req.getDailySubscriptionQty(),
                 req.getSubscriptionFrequency(),
                 req.getSubscriptionPausedUntil(),
-                req.getSubscriptionSkipDatesCsv()
+                req.getSubscriptionSkipDatesCsv(),
+                req.getSubscriptionHolidayWeekdaysCsv()
         );
         boolean subscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
         String normalizedSkipDates = normalizeSubscriptionSkipDatesCsv(req.getSubscriptionSkipDatesCsv());
+        String normalizedHolidayWeekdays = normalizeHolidayWeekdaysCsv(req.getSubscriptionHolidayWeekdaysCsv());
         CustomerRecordEntity entity = repository.findById(customerId)
                 .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
 
@@ -98,6 +106,7 @@ public class CustomerRecordService {
         entity.setSubscriptionFrequency(subscriptionActive ? req.getSubscriptionFrequency() : null);
         entity.setSubscriptionPausedUntil(subscriptionActive ? req.getSubscriptionPausedUntil() : null);
         entity.setSubscriptionSkipDatesCsv(subscriptionActive ? normalizedSkipDates : null);
+        entity.setSubscriptionHolidayWeekdaysCsv(subscriptionActive ? normalizedHolidayWeekdays : null);
         entity.setDefaultMilkUnitPrice(req.getDefaultMilkUnitPrice());
         entity.setActive(Boolean.TRUE.equals(req.getIsActive()));
         entity.setNotes(trimToNull(req.getNotes()));
@@ -147,12 +156,15 @@ public class CustomerRecordService {
             Double dailySubscriptionQty,
             SubscriptionFrequency subscriptionFrequency,
             LocalDate subscriptionPausedUntil,
-            String subscriptionSkipDatesCsv
+            String subscriptionSkipDatesCsv,
+            String subscriptionHolidayWeekdaysCsv
     ) {
         boolean isSubscription = Boolean.TRUE.equals(subscriptionActive);
         if (!isSubscription) {
-            if (subscriptionPausedUntil != null || trimToNull(subscriptionSkipDatesCsv) != null) {
-                throw new IllegalArgumentException("Pause/skip dates are allowed only when subscriptionActive is true");
+            if (subscriptionPausedUntil != null
+                    || trimToNull(subscriptionSkipDatesCsv) != null
+                    || trimToNull(subscriptionHolidayWeekdaysCsv) != null) {
+                throw new IllegalArgumentException("Pause/skip/holiday rules are allowed only when subscriptionActive is true");
             }
             return;
         }
@@ -163,6 +175,7 @@ public class CustomerRecordService {
             throw new IllegalArgumentException("subscriptionFrequency is required when subscriptionActive is true");
         }
         normalizeSubscriptionSkipDatesCsv(subscriptionSkipDatesCsv);
+        normalizeHolidayWeekdaysCsv(subscriptionHolidayWeekdaysCsv);
     }
 
     private String buildId() {
@@ -223,6 +236,58 @@ public class CustomerRecordService {
         return joined;
     }
 
+    private String normalizeHolidayWeekdaysCsv(String value) {
+        String raw = trimToNull(value);
+        if (raw == null) {
+            return null;
+        }
+
+        EnumSet<DayOfWeek> days = EnumSet.noneOf(DayOfWeek.class);
+        String[] tokens = raw.split("[,\\s]+");
+        for (String token : tokens) {
+            String normalized = trimToNull(token);
+            if (normalized == null) {
+                continue;
+            }
+            DayOfWeek day = parseDay(normalized);
+            if (day != null) {
+                days.add(day);
+            }
+        }
+
+        if (days.isEmpty()) {
+            return null;
+        }
+
+        String joined = days.stream()
+                .sorted(Comparator.comparingInt(DayOfWeek::getValue))
+                .map(DayOfWeek::name)
+                .reduce((left, right) -> left + "," + right)
+                .orElse(null);
+        if (joined != null && joined.length() > 140) {
+            throw new IllegalArgumentException("subscriptionHolidayWeekdaysCsv is too long");
+        }
+        return joined;
+    }
+
+    private DayOfWeek parseDay(String token) {
+        String normalized = trimToNull(token);
+        if (normalized == null) {
+            return null;
+        }
+        normalized = normalized.toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "MON", "MONDAY" -> DayOfWeek.MONDAY;
+            case "TUE", "TUESDAY" -> DayOfWeek.TUESDAY;
+            case "WED", "WEDNESDAY" -> DayOfWeek.WEDNESDAY;
+            case "THU", "THURSDAY" -> DayOfWeek.THURSDAY;
+            case "FRI", "FRIDAY" -> DayOfWeek.FRIDAY;
+            case "SAT", "SATURDAY" -> DayOfWeek.SATURDAY;
+            case "SUN", "SUNDAY" -> DayOfWeek.SUNDAY;
+            default -> null;
+        };
+    }
+
     private double safeDouble(Double value) {
         return value == null ? 0.0 : value;
     }
@@ -240,6 +305,7 @@ public class CustomerRecordService {
                 .subscriptionFrequency(entity.getSubscriptionFrequency())
                 .subscriptionPausedUntil(entity.getSubscriptionPausedUntil())
                 .subscriptionSkipDatesCsv(entity.getSubscriptionSkipDatesCsv())
+                .subscriptionHolidayWeekdaysCsv(entity.getSubscriptionHolidayWeekdaysCsv())
                 .runningBalance(safeDouble(entity.getRunningBalance()))
                 .totalPaid(safeDouble(entity.getTotalPaid()))
                 .lastPayoutDate(entity.getLastPayoutDate())

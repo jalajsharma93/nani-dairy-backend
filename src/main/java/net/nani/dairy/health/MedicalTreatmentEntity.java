@@ -40,6 +40,9 @@ public class MedicalTreatmentEntity {
     @Column(name = "treatment_date", nullable = false)
     private LocalDate treatmentDate;
 
+    @Column(name = "template_code", length = 80)
+    private String templateCode;
+
     @Column(name = "diagnosis", nullable = false, length = 160)
     private String diagnosis;
 
@@ -57,6 +60,15 @@ public class MedicalTreatmentEntity {
 
     @Column(name = "prescription_photo_url", length = 700)
     private String prescriptionPhotoUrl;
+
+    @Column(name = "prescription_issued_by", length = 120)
+    private String prescriptionIssuedBy;
+
+    @Column(name = "prescription_issued_date")
+    private LocalDate prescriptionIssuedDate;
+
+    @Column(name = "prescription_reference_no", length = 80)
+    private String prescriptionReferenceNo;
 
     @Column(name = "withdrawal_till_date")
     private LocalDate withdrawalTillDate;

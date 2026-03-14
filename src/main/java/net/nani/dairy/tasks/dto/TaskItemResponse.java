@@ -31,6 +31,9 @@ public class TaskItemResponse {
     private String sourceRefId;
     private LocalDateTime completedAt;
     private String completedBy;
+    private LocalDateTime reminderSentAt;
+    private LocalDateTime escalatedAt;
+    private Integer escalationCount;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

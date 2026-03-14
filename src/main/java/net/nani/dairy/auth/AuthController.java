@@ -83,6 +83,7 @@ public class AuthController {
     }
 
     @PostMapping("/change-password")
+    @PreAuthorize("isAuthenticated()")
     public void changePassword(@Valid @RequestBody ChangePasswordRequest req, Authentication authentication) {
         authService.changePassword(usernameFromAuth(authentication), req);
     }

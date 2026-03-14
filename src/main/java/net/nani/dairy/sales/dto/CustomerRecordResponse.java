@@ -28,6 +28,7 @@ public class CustomerRecordResponse {
     private SubscriptionFrequency subscriptionFrequency;
     private LocalDate subscriptionPausedUntil;
     private String subscriptionSkipDatesCsv;
+    private String subscriptionHolidayWeekdaysCsv;
     private double runningBalance;
     private double totalPaid;
     private LocalDate lastPayoutDate;

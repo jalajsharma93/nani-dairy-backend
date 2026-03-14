@@ -17,6 +17,9 @@ public class DeliveryDayPlanTriggerResponse {
 
     private LocalDate date;
     private int generatedTasks;
+    private int eligibleCandidates;
+    private int alreadyPlannedCandidates;
+    private int blockedCandidates;
     private int autoAssignedTasks;
     private int optimizedTasks;
     private int optimizedRoutes;

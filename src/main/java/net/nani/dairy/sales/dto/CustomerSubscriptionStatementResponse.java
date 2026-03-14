@@ -29,6 +29,7 @@ public class CustomerSubscriptionStatementResponse {
     private int activePlanDays;
     private int pausedDays;
     private int skipDays;
+    private int holidayWeekdayDays;
     private int billedDays;
 
     private double prorationFactor;

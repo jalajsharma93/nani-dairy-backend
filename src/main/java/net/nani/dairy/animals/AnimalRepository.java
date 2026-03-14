@@ -19,4 +19,10 @@ public interface AnimalRepository extends JpaRepository<AnimalEntity, String> {
     Optional<AnimalEntity> findByTag(String tag);
 
     Optional<AnimalEntity> findByTagIgnoreCase(String tag);
+
+    Optional<AnimalEntity> findByAnimalIdIgnoreCase(String animalId);
+
+    List<AnimalEntity> findByMotherAnimalIdIgnoreCase(String motherAnimalId);
+
+    List<AnimalEntity> findBySireTagIgnoreCase(String sireTag);
 }

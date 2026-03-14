@@ -9,6 +9,7 @@ import java.util.Optional;
 
 public interface MilkEntryRepository extends JpaRepository<MilkEntryEntity, String> {
     List<MilkEntryEntity> findByDateAndShift(LocalDate date, Shift shift);
+    List<MilkEntryEntity> findByDateBetween(LocalDate dateFrom, LocalDate dateTo);
 
     Optional<MilkEntryEntity> findByDateAndShiftAndAnimalId(LocalDate date, Shift shift, String animalId);
 

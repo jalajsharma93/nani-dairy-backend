@@ -18,6 +18,9 @@ public class MilkQcRuleEngine {
     static final double TEMPERATURE_HOLD_ABOVE = 38.0;
     static final double LACTOMETER_HOLD_BELOW = 26.0;
     static final double LACTOMETER_HOLD_ABOVE = 34.0;
+    static final double ACIDITY_HOLD_BELOW = 0.12;
+    static final double ACIDITY_HOLD_ABOVE = 0.18;
+    static final double BACTERIAL_HOLD_ABOVE = 1_000_000.0;
 
     public MilkQcRuleEvaluation evaluate(List<MilkEntryEntity> entries) {
         if (entries == null || entries.isEmpty()) {
@@ -35,6 +38,11 @@ public class MilkQcRuleEngine {
         int highTemperatureHoldCount = 0;
         int lactometerOutOfRangeHoldCount = 0;
         int badSmellHoldCount = 0;
+        int abnormalColorHoldCount = 0;
+        int highAcidityHoldCount = 0;
+        int waterAdulterationRejectCount = 0;
+        int antibioticResidueRejectCount = 0;
+        int highBacterialCountHoldCount = 0;
         int explicitRejectCount = 0;
 
         Set<String> triggerCodes = new LinkedHashSet<>();
@@ -56,6 +64,11 @@ public class MilkQcRuleEngine {
             if (outcome.highTemperatureHold()) highTemperatureHoldCount += 1;
             if (outcome.lactometerOutOfRangeHold()) lactometerOutOfRangeHoldCount += 1;
             if (outcome.badSmellHold()) badSmellHoldCount += 1;
+            if (outcome.abnormalColorHold()) abnormalColorHoldCount += 1;
+            if (outcome.highAcidityHold()) highAcidityHoldCount += 1;
+            if (outcome.waterAdulterationReject()) waterAdulterationRejectCount += 1;
+            if (outcome.antibioticResidueReject()) antibioticResidueRejectCount += 1;
+            if (outcome.highBacterialCountHold()) highBacterialCountHoldCount += 1;
             if (outcome.explicitReject()) explicitRejectCount += 1;
 
             triggerCodes.addAll(outcome.triggerCodes());
@@ -91,6 +104,11 @@ public class MilkQcRuleEngine {
                 highTemperatureHoldCount,
                 lactometerOutOfRangeHoldCount,
                 badSmellHoldCount,
+                abnormalColorHoldCount,
+                highAcidityHoldCount,
+                waterAdulterationRejectCount,
+                antibioticResidueRejectCount,
+                highBacterialCountHoldCount,
                 explicitRejectCount,
                 new ArrayList<>(triggerCodes)
         );
@@ -108,6 +126,11 @@ public class MilkQcRuleEngine {
         boolean highTemperatureHold = false;
         boolean lactometerOutOfRangeHold = false;
         boolean badSmellHold = false;
+        boolean abnormalColorHold = false;
+        boolean highAcidityHold = false;
+        boolean waterAdulterationReject = false;
+        boolean antibioticResidueReject = false;
+        boolean highBacterialCountHold = false;
         boolean explicitReject = false;
 
         String rejectionReason = trimToNull(entry.getRejectionReason());
@@ -195,6 +218,61 @@ public class MilkQcRuleEngine {
             }
         }
 
+        String colorObservation = trimToNull(entry.getColorObservation());
+        if (colorObservation != null) {
+            reviewed = true;
+            String normalized = colorObservation.toLowerCase(Locale.ROOT);
+            if (
+                    normalized.contains("abnormal")
+                            || normalized.contains("yellow")
+                            || normalized.contains("watery")
+                            || normalized.contains("bloody")
+                            || normalized.contains("brown")
+                            || normalized.contains("red")
+            ) {
+                if (status != QcStatus.REJECT) {
+                    status = QcStatus.HOLD;
+                }
+                abnormalColorHold = true;
+                triggerCodes.add("COLOR_HOLD");
+            }
+        }
+
+        if (entry.getAcidity() != null) {
+            reviewed = true;
+            if (
+                    (entry.getAcidity() < ACIDITY_HOLD_BELOW || entry.getAcidity() > ACIDITY_HOLD_ABOVE)
+                            && status != QcStatus.REJECT
+            ) {
+                status = QcStatus.HOLD;
+                highAcidityHold = true;
+                triggerCodes.add("ACIDITY_HOLD");
+            }
+        }
+
+        if (Boolean.TRUE.equals(entry.getWaterAdulteration())) {
+            reviewed = true;
+            status = QcStatus.REJECT;
+            waterAdulterationReject = true;
+            triggerCodes.add("WATER_ADULTERATION_REJECT");
+        }
+
+        if (Boolean.TRUE.equals(entry.getAntibioticResidue())) {
+            reviewed = true;
+            status = QcStatus.REJECT;
+            antibioticResidueReject = true;
+            triggerCodes.add("ANTIBIOTIC_RESIDUE_REJECT");
+        }
+
+        if (entry.getBacterialCount() != null) {
+            reviewed = true;
+            if (entry.getBacterialCount() > BACTERIAL_HOLD_ABOVE && status != QcStatus.REJECT) {
+                status = QcStatus.HOLD;
+                highBacterialCountHold = true;
+                triggerCodes.add("BACTERIAL_COUNT_HOLD");
+            }
+        }
+
         return new CowRuleOutcome(
                 reviewed,
                 status,
@@ -205,6 +283,11 @@ public class MilkQcRuleEngine {
                 highTemperatureHold,
                 lactometerOutOfRangeHold,
                 badSmellHold,
+                abnormalColorHold,
+                highAcidityHold,
+                waterAdulterationReject,
+                antibioticResidueReject,
+                highBacterialCountHold,
                 explicitReject,
                 triggerCodes
         );
@@ -213,6 +296,11 @@ public class MilkQcRuleEngine {
     private MilkQcRuleEvaluation emptyEvaluation() {
         return new MilkQcRuleEvaluation(
                 QcStatus.PENDING,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,
@@ -247,6 +335,11 @@ public class MilkQcRuleEngine {
             boolean highTemperatureHold,
             boolean lactometerOutOfRangeHold,
             boolean badSmellHold,
+            boolean abnormalColorHold,
+            boolean highAcidityHold,
+            boolean waterAdulterationReject,
+            boolean antibioticResidueReject,
+            boolean highBacterialCountHold,
             boolean explicitReject,
             List<String> triggerCodes
     ) {

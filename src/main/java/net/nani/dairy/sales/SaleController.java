@@ -7,6 +7,7 @@ import net.nani.dairy.sales.dto.CreateSaleRequest;
 import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionInvoiceSummaryResponse;
 import net.nani.dairy.sales.dto.CustomerSubscriptionStatementResponse;
+import net.nani.dairy.sales.dto.CustomerSubscriptionStatementSummaryResponse;
 import net.nani.dairy.sales.dto.DeliveryChecklistItemResponse;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkRequest;
 import net.nani.dairy.sales.dto.MonthCloseSettlementBulkResponse;
@@ -18,9 +19,13 @@ import net.nani.dairy.sales.dto.SaleResponse;
 import net.nani.dairy.sales.dto.SettlementReconciliationRowResponse;
 import net.nani.dairy.sales.dto.SalesSummaryResponse;
 import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusUpdateResponse;
+import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusAuditResponse;
 import net.nani.dairy.sales.dto.UpdateSubscriptionInvoiceStatusRequest;
 import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
 import net.nani.dairy.sales.dto.UpdateSaleRequest;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -90,6 +95,31 @@ public class SaleController {
         return saleService.subscriptionStatement(customerId, effectiveMonth, includeDaily);
     }
 
+    @GetMapping("/subscription-statements")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public List<CustomerSubscriptionStatementSummaryResponse> subscriptionStatements(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) CustomerType customerType
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        return saleService.subscriptionStatements(effectiveMonth, customerType);
+    }
+
+    @GetMapping(value = "/subscription-statements/export", produces = "text/csv")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public ResponseEntity<String> exportSubscriptionStatements(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) CustomerType customerType
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        String csv = saleService.subscriptionStatementsCsv(effectiveMonth, customerType);
+        String filename = "subscription-statements-" + effectiveMonth + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                .contentType(MediaType.parseMediaType("text/csv"))
+                .body(csv);
+    }
+
     @GetMapping("/subscription-invoice")
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
     public CustomerSubscriptionInvoiceResponse subscriptionInvoice(
@@ -109,6 +139,31 @@ public class SaleController {
     ) {
         String effectiveMonth = month != null ? month : YearMonth.now().toString();
         return saleService.subscriptionInvoices(effectiveMonth, customerType);
+    }
+
+    @GetMapping(value = "/subscription-invoices/export", produces = "text/csv")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public ResponseEntity<String> exportSubscriptionInvoices(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) CustomerType customerType
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        String csv = saleService.subscriptionInvoicesCsv(effectiveMonth, customerType);
+        String filename = "subscription-invoices-" + effectiveMonth + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                .contentType(MediaType.parseMediaType("text/csv"))
+                .body(csv);
+    }
+
+    @GetMapping("/subscription-invoice/audits")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public List<SubscriptionInvoiceStatusAuditResponse> subscriptionInvoiceAudits(
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) String customerId
+    ) {
+        String effectiveMonth = month != null ? month : YearMonth.now().toString();
+        return saleService.subscriptionInvoiceStatusAudits(effectiveMonth, customerId);
     }
 
     @PostMapping("/subscription-invoice/finalize")
@@ -231,7 +286,7 @@ public class SaleController {
         for (var authority : authentication.getAuthorities()) {
             String value = authority == null ? "" : authority.getAuthority();
             for (String role : roles) {
-                if (("ROLE_" + role).equalsIgnoreCase(value)) {
+                if ((("ROLE_" + role)).equalsIgnoreCase(value)) {
                     return true;
                 }
             }

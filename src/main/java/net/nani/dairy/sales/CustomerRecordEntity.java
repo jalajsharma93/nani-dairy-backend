@@ -67,6 +67,9 @@ public class CustomerRecordEntity {
     @Column(name = "subscription_skip_dates_csv", length = 400)
     private String subscriptionSkipDatesCsv;
 
+    @Column(name = "subscription_holiday_weekdays_csv", length = 140)
+    private String subscriptionHolidayWeekdaysCsv;
+
     @Column(name = "running_balance")
     private Double runningBalance;
 

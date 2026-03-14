@@ -1,6 +1,5 @@
 package net.nani.dairy.health.dto;
 
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -20,10 +19,10 @@ public class CreateMedicalTreatmentRequest {
     @NotNull
     private LocalDate treatmentDate;
 
-    @NotBlank
+    private String templateCode;
+
     private String diagnosis;
 
-    @NotBlank
     private String medicineName;
 
     private String dose;
@@ -33,6 +32,12 @@ public class CreateMedicalTreatmentRequest {
     private String veterinarianName;
 
     private String prescriptionPhotoUrl;
+
+    private String prescriptionIssuedBy;
+
+    private LocalDate prescriptionIssuedDate;
+
+    private String prescriptionReferenceNo;
 
     private LocalDate withdrawalTillDate;
 

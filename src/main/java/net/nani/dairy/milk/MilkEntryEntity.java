@@ -55,6 +55,24 @@ public class MilkEntryEntity {
     @Column(name = "rejection_reason", length = 500)
     private String rejectionReason;
 
+    @Column(name = "color_observation", length = 40)
+    private String colorObservation;
+
+    @Column(name = "acidity")
+    private Double acidity;
+
+    @Column(name = "water_adulteration")
+    private Boolean waterAdulteration;
+
+    @Column(name = "antibiotic_residue")
+    private Boolean antibioticResidue;
+
+    @Column(name = "bacterial_count")
+    private Double bacterialCount;
+
+    @Column(name = "lab_test_attachment_url", length = 700)
+    private String labTestAttachmentUrl;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 

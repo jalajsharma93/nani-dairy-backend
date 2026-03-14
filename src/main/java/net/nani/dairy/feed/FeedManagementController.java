@@ -29,6 +29,60 @@ public class FeedManagementController {
         return feedManagementService.summary(date);
     }
 
+    @GetMapping("/forecast")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','WORKER','FEED_MANAGER')")
+    public FeedInventoryForecastResponse forecast(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false, defaultValue = "30") Integer lookbackDays
+    ) {
+        return feedManagementService.forecast(date, lookbackDays);
+    }
+
+
+    @GetMapping("/procurement-plan")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','WORKER','FEED_MANAGER')")
+    public FeedProcurementPlanResponse procurementPlan(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false, defaultValue = "30") Integer lookbackDays,
+            @RequestParam(required = false, defaultValue = "30") Integer horizonDays
+    ) {
+        return feedManagementService.procurementPlan(date, lookbackDays, horizonDays);
+    }
+
+    @PostMapping("/procurement-tasks/generate")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','FEED_MANAGER')")
+    public FeedProcurementTaskGenerationResponse generateProcurementTasks(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false, defaultValue = "30") Integer lookbackDays,
+            @RequestParam(required = false, defaultValue = "30") Integer horizonDays,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate taskDate,
+            Authentication authentication
+    ) {
+        return feedManagementService.generateProcurementTasks(
+                date,
+                lookbackDays,
+                horizonDays,
+                taskDate,
+                actor(authentication)
+        );
+    }
+
+    @GetMapping("/procurement-tasks/runs")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','FEED_MANAGER')")
+    public List<FeedProcurementRunResponse> procurementRuns(
+            @RequestParam(required = false, defaultValue = "20") Integer limit
+    ) {
+        return feedManagementService.procurementRuns(limit);
+    }
+    @GetMapping("/efficiency")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','FEED_MANAGER')")
+    public FeedEfficiencyInsightResponse efficiency(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false, defaultValue = "30") Integer lookbackDays
+    ) {
+        return feedManagementService.efficiency(date, lookbackDays);
+    }
+
     @GetMapping("/materials")
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER','WORKER','FEED_MANAGER')")
     public List<FeedMaterialResponse> listMaterials(@RequestParam(required = false) Boolean lowStockOnly) {

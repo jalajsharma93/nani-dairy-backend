@@ -360,6 +360,9 @@ public class TaskItemService {
                 .sourceRefId(row.getSourceRefId())
                 .completedAt(row.getCompletedAt())
                 .completedBy(row.getCompletedBy())
+                .reminderSentAt(row.getReminderSentAt())
+                .escalatedAt(row.getEscalatedAt())
+                .escalationCount(row.getEscalationCount())
                 .createdAt(row.getCreatedAt())
                 .updatedAt(row.getUpdatedAt())
                 .build();

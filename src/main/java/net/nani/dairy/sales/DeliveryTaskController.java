@@ -60,7 +60,7 @@ public class DeliveryTaskController {
     }
 
     @PostMapping("/add-on")
-    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER','DELIVERY')")
     public DeliveryTaskResponse addAddon(
             @Valid @RequestBody AddDeliveryTaskAddonRequest req,
             Authentication authentication

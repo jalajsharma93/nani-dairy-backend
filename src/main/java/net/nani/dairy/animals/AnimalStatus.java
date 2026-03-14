@@ -4,5 +4,7 @@ public enum AnimalStatus {
     LACTATING,
     DRY,
     SICK,
+    RETIRED,
+    DEAD,
     SOLD
 }

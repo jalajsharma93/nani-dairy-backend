@@ -1,0 +1,17 @@
+ALTER TABLE IF EXISTS milk_entry
+    ADD COLUMN IF NOT EXISTS color_observation VARCHAR(40);
+
+ALTER TABLE IF EXISTS milk_entry
+    ADD COLUMN IF NOT EXISTS acidity DOUBLE PRECISION;
+
+ALTER TABLE IF EXISTS milk_entry
+    ADD COLUMN IF NOT EXISTS water_adulteration BOOLEAN;
+
+ALTER TABLE IF EXISTS milk_entry
+    ADD COLUMN IF NOT EXISTS antibiotic_residue BOOLEAN;
+
+ALTER TABLE IF EXISTS milk_entry
+    ADD COLUMN IF NOT EXISTS bacterial_count DOUBLE PRECISION;
+
+ALTER TABLE IF EXISTS milk_entry
+    ADD COLUMN IF NOT EXISTS lab_test_attachment_url VARCHAR(700);

@@ -50,6 +50,9 @@ public class UpdateCustomerRecordRequest {
     @Size(max = 400)
     private String subscriptionSkipDatesCsv;
 
+    @Size(max = 140)
+    private String subscriptionHolidayWeekdaysCsv;
+
     @Positive
     private Double defaultMilkUnitPrice;
 

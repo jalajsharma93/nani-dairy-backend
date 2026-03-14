@@ -20,4 +20,8 @@ public class CustomerSubscriptionStatementDailyRowResponse {
     private String status;
     private double expectedQty;
     private double expectedAmount;
+    private double billedQty;
+    private double billedAmount;
+    private double varianceQty;
+    private double varianceAmount;
 }
