@@ -10,6 +10,8 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 import net.nani.dairy.sales.DeliveryTaskStatus;
 
+import java.time.OffsetDateTime;
+
 @Getter
 @Setter
 @NoArgsConstructor
@@ -32,4 +34,6 @@ public class UpdateDeliveryTaskStatusRequest {
 
     @Size(max = 500)
     private String notes;
+
+    private OffsetDateTime expectedUpdatedAt;
 }

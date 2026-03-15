@@ -8,6 +8,8 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.time.OffsetDateTime;
+
 @Getter
 @Setter
 @NoArgsConstructor
@@ -20,4 +22,6 @@ public class ReconcileSaleRequest {
 
     @Size(max = 500)
     private String note;
+
+    private OffsetDateTime expectedUpdatedAt;
 }

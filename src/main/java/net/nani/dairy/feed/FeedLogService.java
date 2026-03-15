@@ -7,9 +7,12 @@ import net.nani.dairy.animals.AnimalRepository;
 import net.nani.dairy.feed.dto.CreateFeedLogRequest;
 import net.nani.dairy.feed.dto.FeedLogResponse;
 import net.nani.dairy.feed.dto.UpdateFeedLogRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -59,6 +62,7 @@ public class FeedLogService {
 
         FeedLogEntity entity = feedLogRepository.findById(feedLogId)
                 .orElseThrow(() -> new IllegalArgumentException("Feed log not found"));
+        assertExpectedUpdatedAt(entity, req.getExpectedUpdatedAt());
 
         entity.setFeedDate(req.getFeedDate());
         entity.setAnimalId(req.getAnimalId().trim());
@@ -82,6 +86,18 @@ public class FeedLogService {
     private void validateQuantity(Double quantityKg) {
         if (quantityKg == null || Double.isNaN(quantityKg) || Double.isInfinite(quantityKg) || quantityKg <= 0) {
             throw new IllegalArgumentException("quantityKg must be a positive finite number");
+        }
+    }
+
+    private void assertExpectedUpdatedAt(FeedLogEntity entity, OffsetDateTime expectedUpdatedAt) {
+        if (expectedUpdatedAt == null) {
+            return;
+        }
+        if (entity.getUpdatedAt() == null || !entity.getUpdatedAt().equals(expectedUpdatedAt)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Feed log was updated by another user. Refresh and retry."
+            );
         }
     }
 

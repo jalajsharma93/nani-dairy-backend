@@ -16,9 +16,11 @@ import net.nani.dairy.tasks.dto.CreateTaskItemRequest;
 import net.nani.dairy.tasks.dto.TaskItemResponse;
 import net.nani.dairy.tasks.dto.UpdateTaskItemRequest;
 import net.nani.dairy.tasks.dto.UpdateTaskItemStatusRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -268,6 +270,7 @@ public class TaskItemService {
     ) {
         TaskItemEntity entity = taskItemRepository.findById(taskId)
                 .orElseThrow(() -> new IllegalArgumentException("Task not found"));
+        assertExpectedUpdatedAt(entity, req.getExpectedUpdatedAt());
         String normalizedActor = normalizeActor(actorUsername);
         UserRole safeActorRole = actorRole != null ? actorRole : UserRole.WORKER;
         String assignedTo = trimToNull(entity.getAssignedToUsername());
@@ -415,6 +418,18 @@ public class TaskItemService {
     private String normalizeActor(String actorUsername) {
         String normalized = trimToNull(actorUsername);
         return normalized == null ? "unknown" : normalized;
+    }
+
+    private void assertExpectedUpdatedAt(TaskItemEntity entity, LocalDateTime expectedUpdatedAt) {
+        if (expectedUpdatedAt == null) {
+            return;
+        }
+        if (entity.getUpdatedAt() == null || !entity.getUpdatedAt().equals(expectedUpdatedAt)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Task was updated by another user. Refresh and retry."
+            );
+        }
     }
 
     private boolean isAdmin(UserRole role) {

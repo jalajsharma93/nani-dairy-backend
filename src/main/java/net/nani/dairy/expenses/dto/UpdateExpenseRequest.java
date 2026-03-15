@@ -7,6 +7,7 @@ import net.nani.dairy.expenses.ExpenseCategory;
 import net.nani.dairy.expenses.ExpensePaymentMode;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 
 @Getter
 @Setter
@@ -31,4 +32,6 @@ public class UpdateExpenseRequest {
     private String referenceNo;
     private String counterparty;
     private String notes;
+
+    private OffsetDateTime expectedUpdatedAt;
 }

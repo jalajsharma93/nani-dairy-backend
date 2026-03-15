@@ -136,6 +136,7 @@ public class MedicalTreatmentService {
         MedicalTreatmentEntity entity = medicalTreatmentRepository
                 .findByTreatmentIdAndAnimalId(treatmentId, normalizedAnimalId)
                 .orElseThrow(() -> notFound("Treatment record not found"));
+        assertExpectedUpdatedAt(entity, req.getExpectedUpdatedAt());
 
         entity.setTreatmentDate(normalizedTreatment.treatmentDate());
         entity.setTemplateCode(normalizedTreatment.templateCode());
@@ -358,6 +359,18 @@ public class MedicalTreatmentService {
 
     private ResponseStatusException notFound(String message) {
         return new ResponseStatusException(HttpStatus.NOT_FOUND, message);
+    }
+
+    private void assertExpectedUpdatedAt(MedicalTreatmentEntity entity, java.time.OffsetDateTime expectedUpdatedAt) {
+        if (expectedUpdatedAt == null) {
+            return;
+        }
+        if (entity.getUpdatedAt() == null || !entity.getUpdatedAt().equals(expectedUpdatedAt)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Treatment record was updated by another user. Refresh and retry."
+            );
+        }
     }
 
     private record NormalizedTreatment(

@@ -5,9 +5,12 @@ import net.nani.dairy.expenses.dto.CreateExpenseRequest;
 import net.nani.dairy.expenses.dto.ExpenseResponse;
 import net.nani.dairy.expenses.dto.ExpensesSummaryResponse;
 import net.nani.dairy.expenses.dto.UpdateExpenseRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -54,6 +57,7 @@ public class ExpenseService {
     public ExpenseResponse update(String expenseId, UpdateExpenseRequest req) {
         ExpenseEntity entity = expenseRepository.findById(expenseId)
                 .orElseThrow(() -> new IllegalArgumentException("Expense not found"));
+        assertExpectedUpdatedAt(entity, req.getExpectedUpdatedAt());
 
         entity.setExpenseDate(req.getExpenseDate());
         entity.setCategory(req.getCategory());
@@ -113,5 +117,17 @@ public class ExpenseService {
 
     private String buildId() {
         return "EXP_" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private void assertExpectedUpdatedAt(ExpenseEntity entity, OffsetDateTime expectedUpdatedAt) {
+        if (expectedUpdatedAt == null) {
+            return;
+        }
+        if (entity.getUpdatedAt() == null || !entity.getUpdatedAt().equals(expectedUpdatedAt)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Expense was updated by another user. Refresh and retry."
+            );
+        }
     }
 }

@@ -7,6 +7,7 @@ import lombok.*;
 import net.nani.dairy.feed.FeedRationPhase;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 
 @Getter
 @Setter
@@ -31,4 +32,6 @@ public class UpdateFeedLogRequest {
     private Double quantityKg;
 
     private String notes;
+
+    private OffsetDateTime expectedUpdatedAt;
 }

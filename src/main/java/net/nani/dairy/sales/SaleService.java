@@ -33,9 +33,11 @@ import net.nani.dairy.sales.dto.SubscriptionInvoiceStatusUpdateResponse;
 import net.nani.dairy.sales.dto.UpdateSubscriptionInvoiceStatusRequest;
 import net.nani.dairy.sales.dto.UpdateSaleDeliveryRequest;
 import net.nani.dairy.sales.dto.UpdateSaleRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
 import java.time.DayOfWeek;
@@ -874,6 +876,7 @@ public class SaleService {
     public SaleResponse reconcile(String saleId, ReconcileSaleRequest req, String actorUsername) {
         SaleEntity entity = saleRepository.findById(saleId)
                 .orElseThrow(() -> new IllegalArgumentException("Sale not found"));
+        assertExpectedUpdatedAt(entity, req.getExpectedUpdatedAt());
 
         boolean canReconcile =
                 entity.getProductType() == ProductType.MILK
@@ -2279,6 +2282,18 @@ public class SaleService {
 
     private double safeDouble(Double value) {
         return value == null ? 0.0 : value;
+    }
+
+    private void assertExpectedUpdatedAt(SaleEntity entity, OffsetDateTime expectedUpdatedAt) {
+        if (expectedUpdatedAt == null) {
+            return;
+        }
+        if (entity.getUpdatedAt() == null || !entity.getUpdatedAt().equals(expectedUpdatedAt)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Sale was updated by another user. Refresh and retry."
+            );
+        }
     }
 
     private SaleResponse toResponse(SaleEntity e) {

@@ -29,8 +29,10 @@ import net.nani.dairy.stock.ProcessingStockService;
 import net.nani.dairy.stock.dto.ProcessingStockSummaryResponse;
 import net.nani.dairy.stock.dto.SyncProcessingDayRequest;
 import net.nani.dairy.tasks.TaskAutomationService;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.DayOfWeek;
 import java.time.Duration;
@@ -783,6 +785,7 @@ public class DeliveryTaskService {
     ) {
         DeliveryTaskEntity entity = deliveryTaskRepository.findById(deliveryTaskId)
                 .orElseThrow(() -> new IllegalArgumentException("Delivery task not found"));
+        assertExpectedUpdatedAt(entity, req.getExpectedUpdatedAt());
         String normalizedActor = normalizeActor(actorUsername);
         String currentAssignee = trimToNull(entity.getAssignedToUsername());
 
@@ -1602,6 +1605,18 @@ public class DeliveryTaskService {
     private String normalizeActor(String actorUsername) {
         String normalized = trimToNull(actorUsername);
         return normalized == null ? "unknown" : normalized;
+    }
+
+    private void assertExpectedUpdatedAt(DeliveryTaskEntity entity, OffsetDateTime expectedUpdatedAt) {
+        if (expectedUpdatedAt == null) {
+            return;
+        }
+        if (entity.getUpdatedAt() == null || !entity.getUpdatedAt().equals(expectedUpdatedAt)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Delivery task was updated by another user. Refresh and retry."
+            );
+        }
     }
 
     private DeliveryTaskResponse toResponse(DeliveryTaskEntity entity) {
