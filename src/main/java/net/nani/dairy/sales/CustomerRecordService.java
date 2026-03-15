@@ -45,15 +45,22 @@ public class CustomerRecordService {
     }
 
     public CustomerRecordResponse create(CreateCustomerRecordRequest req) {
+        boolean requestedSubscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
+        boolean hasPositiveDailyQty = req.getDailySubscriptionQty() != null && req.getDailySubscriptionQty() > 0;
+        boolean effectiveSubscriptionActive = requestedSubscriptionActive || hasPositiveDailyQty;
+        Double effectiveDailySubscriptionQty = effectiveSubscriptionActive ? req.getDailySubscriptionQty() : null;
+        SubscriptionFrequency effectiveSubscriptionFrequency = effectiveSubscriptionActive
+                ? (req.getSubscriptionFrequency() != null ? req.getSubscriptionFrequency() : SubscriptionFrequency.DAILY)
+                : null;
+
         validateSubscription(
-                req.getSubscriptionActive(),
-                req.getDailySubscriptionQty(),
-                req.getSubscriptionFrequency(),
+                effectiveSubscriptionActive,
+                effectiveDailySubscriptionQty,
+                effectiveSubscriptionFrequency,
                 req.getSubscriptionPausedUntil(),
                 req.getSubscriptionSkipDatesCsv(),
                 req.getSubscriptionHolidayWeekdaysCsv()
         );
-        boolean subscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
         String normalizedSkipDates = normalizeSubscriptionSkipDatesCsv(req.getSubscriptionSkipDatesCsv());
         String normalizedHolidayWeekdays = normalizeHolidayWeekdaysCsv(req.getSubscriptionHolidayWeekdaysCsv());
 
@@ -64,12 +71,12 @@ public class CustomerRecordService {
                 .phone(trimToNull(req.getPhone()))
                 .routeName(trimToNull(req.getRouteName()))
                 .collectionPoint(trimToNull(req.getCollectionPoint()))
-                .subscriptionActive(subscriptionActive)
-                .dailySubscriptionQty(subscriptionActive ? req.getDailySubscriptionQty() : null)
-                .subscriptionFrequency(subscriptionActive ? req.getSubscriptionFrequency() : null)
-                .subscriptionPausedUntil(subscriptionActive ? req.getSubscriptionPausedUntil() : null)
-                .subscriptionSkipDatesCsv(subscriptionActive ? normalizedSkipDates : null)
-                .subscriptionHolidayWeekdaysCsv(subscriptionActive ? normalizedHolidayWeekdays : null)
+                .subscriptionActive(effectiveSubscriptionActive)
+                .dailySubscriptionQty(effectiveSubscriptionActive ? effectiveDailySubscriptionQty : null)
+                .subscriptionFrequency(effectiveSubscriptionActive ? effectiveSubscriptionFrequency : null)
+                .subscriptionPausedUntil(effectiveSubscriptionActive ? req.getSubscriptionPausedUntil() : null)
+                .subscriptionSkipDatesCsv(effectiveSubscriptionActive ? normalizedSkipDates : null)
+                .subscriptionHolidayWeekdaysCsv(effectiveSubscriptionActive ? normalizedHolidayWeekdays : null)
                 .runningBalance(0.0)
                 .totalPaid(0.0)
                 .lastPayoutDate(null)
@@ -82,31 +89,46 @@ public class CustomerRecordService {
     }
 
     public CustomerRecordResponse update(String customerId, UpdateCustomerRecordRequest req) {
+        CustomerRecordEntity entity = repository.findById(customerId)
+                .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
+
+        boolean requestedSubscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
+        boolean hasPositiveDailyQty = req.getDailySubscriptionQty() != null && req.getDailySubscriptionQty() > 0;
+        boolean effectiveSubscriptionActive = requestedSubscriptionActive || hasPositiveDailyQty;
+        Double fallbackExistingQty = entity.getDailySubscriptionQty() != null && entity.getDailySubscriptionQty() > 0
+                ? entity.getDailySubscriptionQty()
+                : null;
+        Double effectiveDailySubscriptionQty = effectiveSubscriptionActive
+                ? (req.getDailySubscriptionQty() != null ? req.getDailySubscriptionQty() : fallbackExistingQty)
+                : null;
+        SubscriptionFrequency effectiveSubscriptionFrequency = effectiveSubscriptionActive
+                ? (req.getSubscriptionFrequency() != null
+                ? req.getSubscriptionFrequency()
+                : (entity.getSubscriptionFrequency() != null ? entity.getSubscriptionFrequency() : SubscriptionFrequency.DAILY))
+                : null;
+
         validateSubscription(
-                req.getSubscriptionActive(),
-                req.getDailySubscriptionQty(),
-                req.getSubscriptionFrequency(),
+                effectiveSubscriptionActive,
+                effectiveDailySubscriptionQty,
+                effectiveSubscriptionFrequency,
                 req.getSubscriptionPausedUntil(),
                 req.getSubscriptionSkipDatesCsv(),
                 req.getSubscriptionHolidayWeekdaysCsv()
         );
-        boolean subscriptionActive = Boolean.TRUE.equals(req.getSubscriptionActive());
         String normalizedSkipDates = normalizeSubscriptionSkipDatesCsv(req.getSubscriptionSkipDatesCsv());
         String normalizedHolidayWeekdays = normalizeHolidayWeekdaysCsv(req.getSubscriptionHolidayWeekdaysCsv());
-        CustomerRecordEntity entity = repository.findById(customerId)
-                .orElseThrow(() -> new IllegalArgumentException("Customer not found"));
 
         entity.setCustomerName(normalizeRequired(req.getCustomerName(), "customerName is required"));
         entity.setCustomerType(req.getCustomerType());
         entity.setPhone(trimToNull(req.getPhone()));
         entity.setRouteName(trimToNull(req.getRouteName()));
         entity.setCollectionPoint(trimToNull(req.getCollectionPoint()));
-        entity.setSubscriptionActive(subscriptionActive);
-        entity.setDailySubscriptionQty(subscriptionActive ? req.getDailySubscriptionQty() : null);
-        entity.setSubscriptionFrequency(subscriptionActive ? req.getSubscriptionFrequency() : null);
-        entity.setSubscriptionPausedUntil(subscriptionActive ? req.getSubscriptionPausedUntil() : null);
-        entity.setSubscriptionSkipDatesCsv(subscriptionActive ? normalizedSkipDates : null);
-        entity.setSubscriptionHolidayWeekdaysCsv(subscriptionActive ? normalizedHolidayWeekdays : null);
+        entity.setSubscriptionActive(effectiveSubscriptionActive);
+        entity.setDailySubscriptionQty(effectiveSubscriptionActive ? effectiveDailySubscriptionQty : null);
+        entity.setSubscriptionFrequency(effectiveSubscriptionActive ? effectiveSubscriptionFrequency : null);
+        entity.setSubscriptionPausedUntil(effectiveSubscriptionActive ? req.getSubscriptionPausedUntil() : null);
+        entity.setSubscriptionSkipDatesCsv(effectiveSubscriptionActive ? normalizedSkipDates : null);
+        entity.setSubscriptionHolidayWeekdaysCsv(effectiveSubscriptionActive ? normalizedHolidayWeekdays : null);
         entity.setDefaultMilkUnitPrice(req.getDefaultMilkUnitPrice());
         entity.setActive(Boolean.TRUE.equals(req.getIsActive()));
         entity.setNotes(trimToNull(req.getNotes()));
@@ -152,14 +174,14 @@ public class CustomerRecordService {
     }
 
     private void validateSubscription(
-            Boolean subscriptionActive,
+            boolean subscriptionActive,
             Double dailySubscriptionQty,
             SubscriptionFrequency subscriptionFrequency,
             LocalDate subscriptionPausedUntil,
             String subscriptionSkipDatesCsv,
             String subscriptionHolidayWeekdaysCsv
     ) {
-        boolean isSubscription = Boolean.TRUE.equals(subscriptionActive);
+        boolean isSubscription = subscriptionActive;
         if (!isSubscription) {
             if (subscriptionPausedUntil != null
                     || trimToNull(subscriptionSkipDatesCsv) != null
