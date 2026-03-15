@@ -25,6 +25,9 @@ import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkItemResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkRequest;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusBulkResponse;
 import net.nani.dairy.sales.dto.UpdateDeliveryTaskStatusRequest;
+import net.nani.dairy.stock.ProcessingStockService;
+import net.nani.dairy.stock.dto.ProcessingStockSummaryResponse;
+import net.nani.dairy.stock.dto.SyncProcessingDayRequest;
 import net.nani.dairy.tasks.TaskAutomationService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -72,6 +75,7 @@ public class DeliveryTaskService {
     private final SaleService saleService;
     private final AuthUserRepository authUserRepository;
     private final TaskAutomationService taskAutomationService;
+    private final ProcessingStockService processingStockService;
 
     @Transactional
     public List<DeliveryTaskResponse> list(
@@ -698,7 +702,24 @@ public class DeliveryTaskService {
                 .build();
 
         DeliveryRunClosureEntity saved = deliveryRunClosureRepository.save(entity);
-        return toRunClosureResponse(saved);
+        StockClosureState closureState = evaluateStockClosureState(req.getDate());
+
+        boolean autoTransferTriggered = false;
+        double autoTransferredLiters = 0;
+        if (closureState.bothShiftsClosed() && closureState.pendingMilkToCurdLiters() > 0) {
+            autoTransferredLiters = closureState.pendingMilkToCurdLiters();
+            processingStockService.syncDay(
+                    SyncProcessingDayRequest.builder()
+                            .date(req.getDate())
+                            .autoTransferMilkToCurd(true)
+                            .build(),
+                    actor
+            );
+            autoTransferTriggered = true;
+            closureState = evaluateStockClosureState(req.getDate());
+        }
+
+        return toRunClosureResponse(saved, closureState, autoTransferTriggered, autoTransferredLiters);
     }
 
     public List<DeliveryRunClosureResponse> listRunClosures(
@@ -714,7 +735,10 @@ public class DeliveryTaskService {
                     .filter(row -> actor.equalsIgnoreCase(trimToNull(row.getClosedBy())))
                     .toList();
         }
-        return rows.stream().map(this::toRunClosureResponse).toList();
+        StockClosureState closureState = evaluateStockClosureState(effectiveDate);
+        return rows.stream()
+                .map(row -> toRunClosureResponse(row, closureState, false, 0))
+                .toList();
     }
 
     @Transactional
@@ -1617,7 +1641,23 @@ public class DeliveryTaskService {
                 .build();
     }
 
-    private DeliveryRunClosureResponse toRunClosureResponse(DeliveryRunClosureEntity entity) {
+    private DeliveryRunClosureResponse toRunClosureResponse(
+            DeliveryRunClosureEntity entity,
+            StockClosureState closureState,
+            boolean autoTransferTriggered,
+            double autoTransferredLiters
+    ) {
+        String stockState = closureState.state();
+        String stockMessage = closureState.message();
+        if (autoTransferTriggered) {
+            stockState = "AUTO_TRANSFERRED";
+            stockMessage = String.format(
+                    Locale.ROOT,
+                    "Auto-transferred %.2f L milk to curd after both shifts closed.",
+                    roundTo2(autoTransferredLiters)
+            );
+        }
+
         return DeliveryRunClosureResponse.builder()
                 .runClosureId(entity.getRunClosureId())
                 .date(entity.getDate())
@@ -1636,12 +1676,88 @@ public class DeliveryTaskService {
                 .notes(entity.getNotes())
                 .closedBy(entity.getClosedBy())
                 .closedAt(entity.getClosedAt())
+                .amShiftClosed(closureState.amShiftClosed())
+                .pmShiftClosed(closureState.pmShiftClosed())
+                .bothShiftsClosed(closureState.bothShiftsClosed())
+                .pendingMilkToCurdLiters(roundTo2(closureState.pendingMilkToCurdLiters()))
+                .stockAutoTransferTriggered(autoTransferTriggered)
+                .stockTransferState(stockState)
+                .stockAlertChannel("IN_APP")
+                .stockAlertMessage(stockMessage)
                 .createdAt(entity.getCreatedAt())
                 .updatedAt(entity.getUpdatedAt())
                 .build();
     }
 
+    private StockClosureState evaluateStockClosureState(LocalDate date) {
+        LocalDate effectiveDate = date != null ? date : LocalDate.now();
+        List<DeliveryTaskEntity> dayTasks = deliveryTaskRepository.findByTaskDate(effectiveDate);
+
+        boolean hasAmTasks = dayTasks.stream().anyMatch(task -> effectiveShift(task) == Shift.AM);
+        boolean hasPmTasks = dayTasks.stream().anyMatch(task -> effectiveShift(task) == Shift.PM);
+
+        boolean amPending = dayTasks.stream().anyMatch(task ->
+                effectiveShift(task) == Shift.AM && effectiveStatus(task) == DeliveryTaskStatus.PENDING
+        );
+        boolean pmPending = dayTasks.stream().anyMatch(task ->
+                effectiveShift(task) == Shift.PM && effectiveStatus(task) == DeliveryTaskStatus.PENDING
+        );
+
+        boolean amShiftClosed = hasAmTasks && !amPending;
+        boolean pmShiftClosed = hasPmTasks && !pmPending;
+        boolean bothShiftsClosed = hasAmTasks && hasPmTasks && amShiftClosed && pmShiftClosed;
+
+        ProcessingStockSummaryResponse stockSummary = processingStockService.summary(effectiveDate);
+        double pendingMilkToCurdLiters = bothShiftsClosed
+                ? Math.max(0, stockSummary.getMilkBalanceLiters())
+                : 0;
+
+        String state;
+        String message;
+        if (!bothShiftsClosed) {
+            state = "WAITING_SHIFT_CLOSE";
+            message = "AM/PM delivery shifts are not closed yet. Stock transfer alert stays pending.";
+        } else if (pendingMilkToCurdLiters > 0) {
+            state = "READY_FOR_AUTO_TRANSFER";
+            message = String.format(
+                    Locale.ROOT,
+                    "Both shifts closed. Pending milk %.2f L should move to curd.",
+                    roundTo2(pendingMilkToCurdLiters)
+            );
+        } else {
+            state = "NO_PENDING_TRANSFER";
+            message = "Both shifts closed and no pending milk transfer to curd.";
+        }
+
+        return new StockClosureState(
+                amShiftClosed,
+                pmShiftClosed,
+                bothShiftsClosed,
+                pendingMilkToCurdLiters,
+                state,
+                message
+        );
+    }
+
+    private Shift effectiveShift(DeliveryTaskEntity task) {
+        return task.getTaskShift() != null ? task.getTaskShift() : Shift.AM;
+    }
+
+    private DeliveryTaskStatus effectiveStatus(DeliveryTaskEntity task) {
+        return task.getStatus() != null ? task.getStatus() : DeliveryTaskStatus.PENDING;
+    }
+
     private record RouteScopeKey(String routeName, Shift shift) {
+    }
+
+    private record StockClosureState(
+            boolean amShiftClosed,
+            boolean pmShiftClosed,
+            boolean bothShiftsClosed,
+            double pendingMilkToCurdLiters,
+            String state,
+            String message
+    ) {
     }
 
     private static class DeliveryReconciliationAccumulator {

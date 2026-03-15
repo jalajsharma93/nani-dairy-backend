@@ -34,6 +34,14 @@ public class DeliveryRunClosureResponse {
     private String notes;
     private String closedBy;
     private OffsetDateTime closedAt;
+    private Boolean amShiftClosed;
+    private Boolean pmShiftClosed;
+    private Boolean bothShiftsClosed;
+    private Double pendingMilkToCurdLiters;
+    private Boolean stockAutoTransferTriggered;
+    private String stockTransferState;
+    private String stockAlertChannel;
+    private String stockAlertMessage;
     private OffsetDateTime createdAt;
     private OffsetDateTime updatedAt;
 }
