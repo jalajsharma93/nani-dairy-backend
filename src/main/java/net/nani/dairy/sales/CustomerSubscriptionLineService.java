@@ -38,9 +38,21 @@ public class CustomerSubscriptionLineService {
 
     public CustomerSubscriptionLineResponse create(String customerId, CreateCustomerSubscriptionLineRequest req) {
         CustomerRecordEntity customer = validateCustomer(customerId);
+        // Make line creation resilient: if planner/customer lifecycle was not toggled yet,
+        // auto-enable subscription defaults from the line being created.
         if (!customer.isSubscriptionActive()) {
-            throw new IllegalArgumentException("Customer subscription must be active before adding subscription lines");
+            customer.setSubscriptionActive(true);
         }
+        if (customer.getSubscriptionFrequency() == null) {
+            customer.setSubscriptionFrequency(SubscriptionFrequency.DAILY);
+        }
+        if (customer.getDailySubscriptionQty() == null || customer.getDailySubscriptionQty() <= 0) {
+            customer.setDailySubscriptionQty(req.getQuantity());
+        }
+        if (customer.getDefaultMilkUnitPrice() == null || customer.getDefaultMilkUnitPrice() <= 0) {
+            customer.setDefaultMilkUnitPrice(req.getUnitPrice());
+        }
+        customerRecordRepository.save(customer);
         validateDateWindow(req.getStartDate(), req.getEndDate());
 
         CustomerSubscriptionLineEntity entity = CustomerSubscriptionLineEntity.builder()
