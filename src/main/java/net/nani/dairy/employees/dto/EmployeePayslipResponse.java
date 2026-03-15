@@ -1,10 +1,15 @@
 package net.nani.dairy.employees.dto;
 
-import lombok.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 import net.nani.dairy.employees.EmployeeMonthlyPayoutStatus;
 import net.nani.dairy.employees.EmployeeType;
 import net.nani.dairy.sales.PaymentMode;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 
 @Getter
@@ -12,20 +17,17 @@ import java.time.OffsetDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class EmployeeAttendanceMonthlyRowResponse {
+public class EmployeePayslipResponse {
+    private String month;
+    private LocalDate dateFrom;
+    private LocalDate dateTo;
     private String employeeId;
     private String employeeName;
     private EmployeeType employeeType;
-    private boolean active;
-    private int workingDaysInMonth;
     private int presentDays;
     private int absentDays;
     private int presentShifts;
-    private int absentShifts;
-    private int shiftsMarked;
     private double totalHoursWorked;
-    private double avgHoursPerPresentDay;
-    private double overtimeHours;
     private double suggestedSalary;
     private double bonusAmount;
     private double productionIncentiveAmount;
@@ -33,11 +35,13 @@ public class EmployeeAttendanceMonthlyRowResponse {
     private double deductionAmount;
     private double grossSalary;
     private double netPayableSalary;
-    private String payoutId;
     private EmployeeMonthlyPayoutStatus payoutStatus;
     private double paidAmount;
     private double pendingAmount;
-    private PaymentMode payoutPaymentMode;
-    private String payoutReferenceNo;
-    private OffsetDateTime payoutUpdatedAt;
+    private PaymentMode paymentMode;
+    private String paymentReferenceNo;
+    private String payoutNotes;
+    private OffsetDateTime approvedAt;
+    private OffsetDateTime paidAt;
+    private OffsetDateTime generatedAt;
 }

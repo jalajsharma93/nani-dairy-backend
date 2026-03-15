@@ -4,7 +4,10 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import net.nani.dairy.employees.dto.BulkUpsertEmployeeAttendanceRequest;
 import net.nani.dairy.employees.dto.EmployeeAttendanceMonthlyReportResponse;
+import net.nani.dairy.employees.dto.EmployeeMonthlyPayoutResponse;
+import net.nani.dairy.employees.dto.EmployeePayslipResponse;
 import net.nani.dairy.employees.dto.EmployeeAttendanceResponse;
+import net.nani.dairy.employees.dto.UpsertEmployeeMonthlyPayoutRequest;
 import net.nani.dairy.employees.dto.UpsertEmployeeAttendanceRequest;
 import net.nani.dairy.milk.Shift;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -120,6 +123,91 @@ public class EmployeeAttendanceController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"attendance-" + effectiveMonth + ".csv\"")
                 .contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
                 .body(csv);
+    }
+
+    @GetMapping("/monthly/payouts")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public List<EmployeeMonthlyPayoutResponse> monthlyPayouts(
+            @RequestParam String month
+    ) {
+        return attendanceService.monthlyPayouts(month);
+    }
+
+    @PostMapping("/monthly/payouts")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public EmployeeMonthlyPayoutResponse upsertMonthlyPayout(
+            @Valid @RequestBody UpsertEmployeeMonthlyPayoutRequest req,
+            Authentication authentication
+    ) {
+        return attendanceService.upsertMonthlyPayout(req, actor(authentication));
+    }
+
+    @GetMapping("/monthly/payslip")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public EmployeePayslipResponse payslip(
+            @RequestParam String month,
+            @RequestParam String employeeId,
+            @RequestParam(required = false) Boolean includeAdjustments,
+            @RequestParam(required = false) SalaryComputationMode salaryMode,
+            @RequestParam(required = false) Double fullTimeDailyRate,
+            @RequestParam(required = false) Double partTimeDailyRate,
+            @RequestParam(required = false) Double fullTimeShiftRate,
+            @RequestParam(required = false) Double partTimeShiftRate,
+            @RequestParam(required = false) Double hourlyRate,
+            @RequestParam(required = false) Double overtimeHourlyRate,
+            @RequestParam(required = false) Double standardHoursPerDay
+    ) {
+        return attendanceService.payslip(
+                month,
+                employeeId,
+                includeAdjustments,
+                salaryMode,
+                fullTimeDailyRate,
+                partTimeDailyRate,
+                fullTimeShiftRate,
+                partTimeShiftRate,
+                hourlyRate,
+                overtimeHourlyRate,
+                standardHoursPerDay
+        );
+    }
+
+    @GetMapping(value = "/monthly/payslip/export", produces = "text/html")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
+    public ResponseEntity<String> payslipExport(
+            @RequestParam String month,
+            @RequestParam String employeeId,
+            @RequestParam(required = false) Boolean includeAdjustments,
+            @RequestParam(required = false) SalaryComputationMode salaryMode,
+            @RequestParam(required = false) Double fullTimeDailyRate,
+            @RequestParam(required = false) Double partTimeDailyRate,
+            @RequestParam(required = false) Double fullTimeShiftRate,
+            @RequestParam(required = false) Double partTimeShiftRate,
+            @RequestParam(required = false) Double hourlyRate,
+            @RequestParam(required = false) Double overtimeHourlyRate,
+            @RequestParam(required = false) Double standardHoursPerDay
+    ) {
+        String html = attendanceService.payslipHtml(
+                month,
+                employeeId,
+                includeAdjustments,
+                salaryMode,
+                fullTimeDailyRate,
+                partTimeDailyRate,
+                fullTimeShiftRate,
+                partTimeShiftRate,
+                hourlyRate,
+                overtimeHourlyRate,
+                standardHoursPerDay
+        );
+
+        return ResponseEntity.ok()
+                .header(
+                        HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"payslip-" + employeeId + "-" + month + ".html\""
+                )
+                .contentType(new MediaType("text", "html", StandardCharsets.UTF_8))
+                .body(html);
     }
 
     private String actor(Authentication authentication) {
