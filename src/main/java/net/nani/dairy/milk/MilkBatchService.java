@@ -1,6 +1,8 @@
 package net.nani.dairy.milk;
 
 import lombok.RequiredArgsConstructor;
+import net.nani.dairy.audit.ApprovalService;
+import net.nani.dairy.auth.UserRole;
 import net.nani.dairy.milk.dto.MilkBatchResponse;
 import net.nani.dairy.milk.dto.MilkBatchQcEvaluationResponse;
 import net.nani.dairy.milk.dto.MilkQcOverrideAuditResponse;
@@ -10,8 +12,10 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -22,6 +26,7 @@ public class MilkBatchService {
     private final MilkEntryRepository milkEntryRepository;
     private final MilkQcRuleEngine milkQcRuleEngine;
     private final MilkQcOverrideAuditRepository milkQcOverrideAuditRepository;
+    private final ApprovalService approvalService;
 
     public MilkBatchResponse get(LocalDate date, Shift shift) {
         return repo.findByDateAndShift(date, shift)
@@ -77,6 +82,8 @@ public class MilkBatchService {
         MilkQcRuleEvaluation evaluation = evaluateRules(req.getDate(), req.getShift());
         QcStatus recommendedStatus = evaluation.recommendedQcStatus();
         QcStatus appliedStatus = requestedStatus;
+        QcStatus previousStatus = entity.getQcStatus();
+        UserRole actorUserRole = parseRole(actorRole);
 
         boolean lessStrictThanRecommended = isLessStrict(requestedStatus, recommendedStatus);
         boolean overrideRequested = Boolean.TRUE.equals(req.getOverrideRecommendedStatus());
@@ -85,14 +92,26 @@ public class MilkBatchService {
 
         if (lessStrictThanRecommended) {
             if (overrideRequested) {
-                if (!supervisorActor) {
-                    throw new IllegalArgumentException("Only ADMIN can approve QC override");
-                }
                 if (overrideReason == null) {
                     throw new IllegalArgumentException("overrideReason is required for QC override");
                 }
-                overrideApproved = true;
-                appliedStatus = requestedStatus;
+                if (supervisorActor) {
+                    overrideApproved = true;
+                    appliedStatus = requestedStatus;
+                } else if (actorUserRole == UserRole.MANAGER) {
+                    approvalService.assertApprovedForAction(
+                            req.getApprovalRequestId(),
+                            "MILK_QC",
+                            "QC_OVERRIDE",
+                            actorUsername,
+                            actorUserRole,
+                            UserRole.ADMIN
+                    );
+                    overrideApproved = true;
+                    appliedStatus = requestedStatus;
+                } else {
+                    throw new IllegalArgumentException("Only ADMIN or approved MANAGER can override QC recommendation");
+                }
             } else {
                 appliedStatus = recommendedStatus;
             }
@@ -107,12 +126,31 @@ public class MilkBatchService {
                     overrideApproved,
                     overrideReason,
                     actorUsername,
-                    actorRole,
+                    actorUserRole.name(),
                     evaluation.triggerCodes()
             );
         }
 
-        if (entity.getQcStatus() == appliedStatus) {
+        approvalService.logAudit(
+                "MILK_QC",
+                "BATCH_QC_UPDATE",
+                entity.getMilkBatchId(),
+                actorUsername,
+                actorUserRole,
+                qcAuditPayload(
+                        req,
+                        previousStatus,
+                        requestedStatus,
+                        recommendedStatus,
+                        appliedStatus,
+                        overrideRequested,
+                        overrideApproved,
+                        overrideReason,
+                        evaluation.triggerCodes()
+                )
+        );
+
+        if (previousStatus == appliedStatus) {
             return toResponse(entity);
         }
 
@@ -215,6 +253,44 @@ public class MilkBatchService {
     private String normalizeActorRole(String actorRole) {
         String normalized = trimToNull(actorRole);
         return normalized == null ? "UNKNOWN" : normalized.toUpperCase(Locale.ROOT);
+    }
+
+    private UserRole parseRole(String actorRole) {
+        String normalized = trimToNull(actorRole);
+        if (normalized == null) {
+            return UserRole.WORKER;
+        }
+        try {
+            return UserRole.valueOf(normalized.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return UserRole.WORKER;
+        }
+    }
+
+    private Map<String, Object> qcAuditPayload(
+            UpdateMilkBatchQcRequest req,
+            QcStatus previousStatus,
+            QcStatus requestedStatus,
+            QcStatus recommendedStatus,
+            QcStatus appliedStatus,
+            boolean overrideRequested,
+            boolean overrideApproved,
+            String overrideReason,
+            List<String> triggerCodes
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("date", req.getDate());
+        payload.put("shift", req.getShift());
+        payload.put("previousStatus", previousStatus);
+        payload.put("requestedStatus", requestedStatus);
+        payload.put("recommendedStatus", recommendedStatus);
+        payload.put("appliedStatus", appliedStatus);
+        payload.put("overrideRequested", overrideRequested);
+        payload.put("overrideApproved", overrideApproved);
+        payload.put("overrideReason", overrideReason);
+        payload.put("triggerCodes", triggerCodes);
+        payload.put("approvalRequestId", trimToNull(req.getApprovalRequestId()));
+        return payload;
     }
 
     private String trimToNull(String value) {

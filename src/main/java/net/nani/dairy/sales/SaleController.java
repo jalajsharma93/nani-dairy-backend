@@ -56,13 +56,13 @@ public class SaleController {
     @PostMapping
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
     public SaleResponse create(@Valid @RequestBody CreateSaleRequest req, Authentication authentication) {
-        return saleService.create(req, actor(authentication));
+        return saleService.create(req, actor(authentication), actorRole(authentication));
     }
 
     @PutMapping("/{saleId}")
     @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
     public SaleResponse update(@PathVariable String saleId, @Valid @RequestBody UpdateSaleRequest req, Authentication authentication) {
-        return saleService.update(saleId, req, actor(authentication));
+        return saleService.update(saleId, req, actor(authentication), actorRole(authentication));
     }
 
     @GetMapping("/summary")
@@ -277,6 +277,19 @@ public class SaleController {
 
     private String actor(Authentication authentication) {
         return authentication != null ? authentication.getName() : "unknown";
+    }
+
+    private String actorRole(Authentication authentication) {
+        if (authentication == null || authentication.getAuthorities() == null) {
+            return "UNKNOWN";
+        }
+        for (var authority : authentication.getAuthorities()) {
+            String value = authority == null ? "" : authority.getAuthority();
+            if (value.startsWith("ROLE_")) {
+                return value.substring("ROLE_".length());
+            }
+        }
+        return "UNKNOWN";
     }
 
     private boolean hasAnyRole(Authentication authentication, String... roles) {

@@ -32,6 +32,10 @@ public class UpdateMilkBatchQcRequest {
     @Getter
     private String overrideReason;
 
+    @Size(max = 80)
+    @Getter
+    private String approvalRequestId;
+
     public LocalDate getDate() {
         return date != null ? date : LocalDate.now();
     }

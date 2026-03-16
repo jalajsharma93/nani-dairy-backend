@@ -1,8 +1,10 @@
 package net.nani.dairy.sales;
 
 import lombok.RequiredArgsConstructor;
+import net.nani.dairy.audit.ApprovalService;
 import net.nani.dairy.animals.AnimalEntity;
 import net.nani.dairy.animals.AnimalRepository;
+import net.nani.dairy.auth.UserRole;
 import net.nani.dairy.health.MedicalTreatmentRepository;
 import net.nani.dairy.milk.MilkBatchRepository;
 import net.nani.dairy.milk.MilkEntryRepository;
@@ -72,6 +74,7 @@ public class SaleService {
     private final SaleComplianceOverrideAuditRepository saleComplianceOverrideAuditRepository;
     private final SubscriptionInvoiceStatusAuditRepository subscriptionInvoiceStatusAuditRepository;
     private final TransactionTemplate transactionTemplate;
+    private final ApprovalService approvalService;
 
     public List<SaleResponse> list(LocalDate date, CustomerType customerType, ProductType productType) {
         List<SaleEntity> rows;
@@ -99,7 +102,13 @@ public class SaleService {
 
     @Transactional
     public SaleResponse create(CreateSaleRequest req, String actorUsername) {
+        return create(req, actorUsername, "UNKNOWN");
+    }
+
+    @Transactional
+    public SaleResponse create(CreateSaleRequest req, String actorUsername, String actorRole) {
         String saleId = buildId();
+        UserRole actorUserRole = parseRole(actorRole);
         CustomerRecordEntity linkedCustomer = resolveLinkedCustomer(req.getCustomerId(), req.getCustomerName());
         String normalizedCustomerName = linkedCustomer != null
                 ? linkedCustomer.getCustomerName()
@@ -107,6 +116,18 @@ public class SaleService {
         CustomerType normalizedCustomerType = linkedCustomer != null
                 ? linkedCustomer.getCustomerType()
                 : req.getCustomerType();
+
+        boolean backdatedCreate = req.getDispatchDate() != null && req.getDispatchDate().isBefore(LocalDate.now());
+        if (backdatedCreate && actorUserRole != UserRole.ADMIN) {
+            approvalService.assertApprovedForAction(
+                    req.getApprovalRequestId(),
+                    "SALES",
+                    "BACKDATED_CREATE",
+                    actorUsername,
+                    actorUserRole,
+                    UserRole.ADMIN
+            );
+        }
 
         validateMilkRule(
                 req.getProductType(),
@@ -172,11 +193,28 @@ public class SaleService {
                 .build();
 
         applySubscriptionBalanceImpact(entity, linkedCustomer);
-        return toResponse(saleRepository.save(entity));
+        SaleEntity saved = saleRepository.save(entity);
+
+        approvalService.logAudit(
+                "SALES",
+                "SALE_CREATE",
+                saved.getSaleId(),
+                actorUsername,
+                actorUserRole,
+                saleAuditPayload(saved, backdatedCreate, false)
+        );
+
+        return toResponse(saved);
     }
 
     @Transactional
     public SaleResponse update(String saleId, UpdateSaleRequest req, String actorUsername) {
+        return update(saleId, req, actorUsername, "UNKNOWN");
+    }
+
+    @Transactional
+    public SaleResponse update(String saleId, UpdateSaleRequest req, String actorUsername, String actorRole) {
+        UserRole actorUserRole = parseRole(actorRole);
         CustomerRecordEntity linkedCustomer = resolveLinkedCustomer(req.getCustomerId(), req.getCustomerName());
         String normalizedCustomerName = linkedCustomer != null
                 ? linkedCustomer.getCustomerName()
@@ -217,6 +255,19 @@ public class SaleService {
                 req.getFatRatePerKg(),
                 req.getSnfRatePerKg()
         );
+
+        boolean backdatedEdit = req.getDispatchDate() != null && req.getDispatchDate().isBefore(LocalDate.now());
+        boolean priceEdited = Double.compare(safeDouble(entity.getUnitPrice()), pricing.effectiveUnitPrice()) != 0;
+        if ((backdatedEdit || priceEdited) && actorUserRole != UserRole.ADMIN) {
+            approvalService.assertApprovedForAction(
+                    req.getApprovalRequestId(),
+                    "SALES",
+                    backdatedEdit && priceEdited ? "BACKDATED_PRICE_EDIT" : backdatedEdit ? "BACKDATED_EDIT" : "PRICE_EDIT",
+                    actorUsername,
+                    actorUserRole,
+                    UserRole.ADMIN
+            );
+        }
 
         PaymentValues payment = computePayment(req.getQuantity(), pricing.effectiveUnitPrice(), req.getReceivedAmount());
 
@@ -260,7 +311,16 @@ public class SaleService {
         entity.setCustomerBalanceAfterSale(linkedCustomer != null ? safeDouble(linkedCustomer.getRunningBalance()) : null);
         applySubscriptionBalanceImpact(entity, linkedCustomer);
 
-        return toResponse(saleRepository.save(entity));
+        SaleEntity saved = saleRepository.save(entity);
+        approvalService.logAudit(
+                "SALES",
+                "SALE_UPDATE",
+                saved.getSaleId(),
+                actorUsername,
+                actorUserRole,
+                saleAuditPayload(saved, backdatedEdit, priceEdited)
+        );
+        return toResponse(saved);
     }
 
     public SalesSummaryResponse dailySummary(LocalDate date) {
@@ -2259,6 +2319,34 @@ public class SaleService {
 
     private String buildOverrideAuditId() {
         return "SOV_" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private UserRole parseRole(String actorRole) {
+        String normalized = trimToNull(actorRole);
+        if (normalized == null) {
+            return UserRole.WORKER;
+        }
+        try {
+            return UserRole.valueOf(normalized.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return UserRole.WORKER;
+        }
+    }
+
+    private Map<String, Object> saleAuditPayload(SaleEntity sale, boolean backdatedChange, boolean priceEdited) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("saleId", sale.getSaleId());
+        payload.put("dispatchDate", sale.getDispatchDate());
+        payload.put("customerId", sale.getCustomerId());
+        payload.put("customerName", sale.getCustomerName());
+        payload.put("productType", sale.getProductType());
+        payload.put("quantity", sale.getQuantity());
+        payload.put("unitPrice", sale.getUnitPrice());
+        payload.put("totalAmount", sale.getTotalAmount());
+        payload.put("pendingAmount", sale.getPendingAmount());
+        payload.put("backdatedChange", backdatedChange);
+        payload.put("priceEdited", priceEdited);
+        return payload;
     }
 
     private String trimToNull(String value) {

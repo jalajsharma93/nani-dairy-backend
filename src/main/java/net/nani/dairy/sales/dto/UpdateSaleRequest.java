@@ -73,4 +73,7 @@ public class UpdateSaleRequest {
 
     @Size(max = 700)
     private String overrideReason;
+
+    @Size(max = 80)
+    private String approvalRequestId;
 }
