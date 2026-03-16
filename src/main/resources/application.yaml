@@ -26,6 +26,30 @@ app:
     procurement-lookback-days: 30
     procurement-horizon-days: 30
 
+management:
+  endpoints:
+    enabled-by-default: true
+    access:
+      default: unrestricted
+    web:
+      base-path: /actuator
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    info:
+      access: unrestricted
+    metrics:
+      access: unrestricted
+    prometheus:
+      access: unrestricted
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: nani-dairy-backend
+
 logging:
   level:
     org.hibernate.SQL: debug

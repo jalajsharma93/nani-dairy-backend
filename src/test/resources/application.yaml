@@ -14,3 +14,7 @@ app:
     jwt-exp-hours: 24
   delivery:
     day-planner-enabled: false
+  tasks:
+    automation-enabled: false
+  feed:
+    procurement-automation-enabled: false
